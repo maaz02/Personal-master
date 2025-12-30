@@ -45,6 +45,26 @@
 
     --radius: 0.875rem;
   }
+
+  .app-theme {
+    --background: 217 50% 97%;
+    --foreground: 220 59% 15%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 59% 15%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 59% 15%;
+    --primary: 226 82% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 203 89% 62%;
+    --secondary-foreground: 220 59% 15%;
+    --muted: 216 56% 96%;
+    --muted-foreground: 216 15% 49%;
+    --accent: 218 100% 96%;
+    --accent-foreground: 220 59% 15%;
+    --border: 217 47% 93%;
+    --input: 217 47% 93%;
+    --ring: 226 82% 55%;
+  }
 }
 
 @layer base {

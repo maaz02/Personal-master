@@ -14,9 +14,9 @@ const SkeletonAuth = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 px-6 py-20">
+    <div className="app-theme min-h-screen bg-background px-6 py-20">
       <div className="mx-auto max-w-lg">
-        <Card className="border-border/70 bg-card/80 p-8 shadow-[0_20px_60px_rgba(15,23,42,0.45)]">
+        <Card className="border-border bg-card p-8 shadow-[0_20px_50px_rgba(15,30,59,0.12)]">
           <div className="space-y-2">
             <h1 className="text-2xl font-semibold text-foreground">
               {mode === "login" ? "Welcome back" : "Create your account"}

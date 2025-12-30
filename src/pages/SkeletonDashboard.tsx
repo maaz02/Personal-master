@@ -554,7 +554,7 @@ const SkeletonDashboard = () => {
 
   const countBubble = (count: number) =>
     count > 0 ? (
-      <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-sky-400/20 px-1 text-xs font-semibold text-sky-100 ring-1 ring-sky-300/30">
+      <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary/10 px-1 text-xs font-semibold text-primary ring-1 ring-primary/20">
         {count}
       </span>
     ) : null;
@@ -677,33 +677,36 @@ const SkeletonDashboard = () => {
   };
 
   const cardBase =
-    "relative overflow-hidden rounded-2xl border border-white/10 bg-[linear-gradient(140deg,rgba(15,23,42,0.9)_0%,rgba(2,6,23,0.96)_70%)] shadow-[0_16px_50px_rgba(2,6,23,0.45)] backdrop-blur";
+    "relative overflow-hidden rounded-2xl border border-border bg-card shadow-[0_18px_40px_rgba(15,30,59,0.08)]";
   const cardHover =
-    "transition-all duration-300 hover:-translate-y-0.5 hover:border-white/25 hover:shadow-[0_30px_80px_rgba(14,165,233,0.18)]";
+    "transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_22px_50px_rgba(15,30,59,0.12)]";
   const rowCard =
-    "group relative rounded-xl border border-white/10 bg-slate-900/50 backdrop-blur transition-all duration-200 hover:border-white/25 hover:bg-slate-900/70 hover:shadow-[0_16px_50px_rgba(2,6,23,0.45)]";
+    "group relative rounded-xl border border-border bg-card/90 transition-all duration-200 hover:border-primary/30 hover:bg-white hover:shadow-[0_14px_30px_rgba(15,30,59,0.12)]";
   const tabListBase =
-    "flex flex-wrap gap-1.5 justify-start rounded-2xl border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.9),rgba(2,6,23,0.92))] p-1.5 shadow-[0_10px_30px_rgba(2,6,23,0.55)] backdrop-blur";
-  const tileCard = `${cardBase} ${cardHover} group p-5 before:pointer-events-none before:absolute before:inset-0 before:opacity-0 before:transition-opacity before:duration-300 before:content-[''] before:bg-[radial-gradient(120%_100%_at_80%_0%,rgba(56,189,248,0.2),transparent_55%)] hover:before:opacity-100`;
+    "flex flex-wrap gap-1.5 justify-start rounded-full border border-border bg-white/70 p-1.5 shadow-[0_10px_22px_rgba(15,30,59,0.08)] backdrop-blur";
+  const tileCard = `${cardBase} ${cardHover} group p-5 before:pointer-events-none before:absolute before:inset-0 before:opacity-0 before:transition-opacity before:duration-300 before:content-[''] before:bg-[radial-gradient(120%_100%_at_80%_0%,rgba(74,179,244,0.18),transparent_60%)] hover:before:opacity-100`;
 
   const showWeekTab = timeRange === "7d";
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-slate-950 text-foreground">
-      <div className="pointer-events-none absolute -top-32 right-0 h-72 w-72 rounded-full bg-sky-400/25 blur-[120px]" />
-      <div className="pointer-events-none absolute -bottom-40 left-0 h-96 w-96 rounded-full bg-indigo-500/20 blur-[140px]" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_40%_at_50%_0%,rgba(56,189,248,0.12),transparent_60%)]" />
-      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(120deg,rgba(14,165,233,0.08),transparent_45%)]" />
-      <div className="pointer-events-none absolute inset-0 opacity-25 [background-image:radial-gradient(rgba(148,163,184,0.25)_1px,transparent_0)] [background-size:18px_18px] [mask-image:radial-gradient(70%_60%_at_50%_20%,black,transparent)]" />
-      <div className="pointer-events-none absolute left-1/2 top-24 h-64 w-[860px] -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-sky-400/20 to-transparent blur-[120px]" />
+    <div className="app-theme relative min-h-screen overflow-hidden bg-background text-foreground">
+      <div className="pointer-events-none absolute -top-32 right-0 h-72 w-72 rounded-full bg-primary/15 blur-[120px]" />
+      <div className="pointer-events-none absolute -bottom-40 left-0 h-96 w-96 rounded-full bg-secondary/20 blur-[140px]" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_40%_at_50%_0%,rgba(74,179,244,0.2),transparent_60%)]" />
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(120deg,rgba(47,91,234,0.12),transparent_45%)]" />
+      <div className="pointer-events-none absolute inset-0 opacity-25 [background-image:radial-gradient(rgba(47,91,234,0.12)_1px,transparent_0)] [background-size:22px_22px] [mask-image:radial-gradient(70%_60%_at_50%_20%,black,transparent)]" />
+      <div className="pointer-events-none absolute left-1/2 top-24 h-64 w-[860px] -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-primary/15 to-transparent blur-[120px]" />
 
       <div className="relative z-10">
-        <div className="relative border-b border-white/10 bg-slate-950/70 backdrop-blur-xl">
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-sky-400/60 to-transparent" />
+        <div className="relative border-b border-border bg-white/80 backdrop-blur-xl">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent" />
           <div className="container mx-auto flex flex-col gap-3 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex items-center gap-3">
               <div className="text-lg font-semibold text-foreground">
-                Clinic Appointments <span className="bg-gradient-to-r from-sky-300 to-blue-500 bg-clip-text text-transparent">Dashboard</span>
+                Clinic Appointments{" "}
+                <span className="bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
+                  Dashboard
+                </span>
               </div>
               <Badge variant="outline" className="border-primary/40 text-primary">
                 Placeholder
@@ -711,7 +714,7 @@ const SkeletonDashboard = () => {
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <Select value={timeRange} onValueChange={setTimeRange}>
-                <SelectTrigger className="w-40 border-white/10 bg-slate-900/70">
+                <SelectTrigger className="w-40 border-border bg-white">
                   <SelectValue placeholder="Range" />
                 </SelectTrigger>
                 <SelectContent>
@@ -731,15 +734,18 @@ const SkeletonDashboard = () => {
           <div className="grid gap-6">
             <div>
               <h2 className="text-lg font-semibold text-foreground">
-                Front desk <span className="bg-gradient-to-r from-sky-300 to-blue-400 bg-clip-text text-transparent">overview</span>
+                Front desk{" "}
+                <span className="bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
+                  overview
+                </span>
               </h2>
               <p className="text-sm text-muted-foreground">Keep the queue moving with clear, single actions.</p>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "0ms" }}>
-                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-sky-500/25 blur-3xl" />
-                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-indigo-500/20 blur-3xl" />
+                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-primary/20 blur-3xl" />
+                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-secondary/25 blur-3xl" />
                 <div className="relative flex flex-col gap-3">
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>Send now</span>
@@ -754,8 +760,8 @@ const SkeletonDashboard = () => {
                 </div>
               </Card>
               <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "80ms" }}>
-                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-cyan-400/20 blur-3xl" />
-                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-blue-500/20 blur-3xl" />
+                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-secondary/20 blur-3xl" />
+                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-primary/15 blur-3xl" />
                 <div className="relative flex flex-col gap-3">
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>Sent today</span>
@@ -770,8 +776,8 @@ const SkeletonDashboard = () => {
                 </div>
               </Card>
               <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "160ms" }}>
-                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-sky-500/20 blur-3xl" />
-                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-indigo-500/20 blur-3xl" />
+                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-primary/20 blur-3xl" />
+                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-secondary/20 blur-3xl" />
                 <div className="relative flex flex-col gap-3">
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>Follow-ups</span>
@@ -789,8 +795,8 @@ const SkeletonDashboard = () => {
                 </div>
               </Card>
               <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "240ms" }}>
-                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-indigo-500/20 blur-3xl" />
-                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-slate-500/20 blur-3xl" />
+                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-primary/15 blur-3xl" />
+                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-primary/10 blur-3xl" />
                 <div className="relative flex flex-col gap-3">
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>Needs review</span>
@@ -808,7 +814,7 @@ const SkeletonDashboard = () => {
 
             <div className="grid gap-4 md:grid-cols-2">
               <Card className={`${cardBase} ${cardHover} p-5`}>
-                <div className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full bg-sky-500/20 blur-3xl" />
+                <div className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full bg-primary/15 blur-3xl" />
                 <div className="relative">
                   <div className="text-sm text-muted-foreground">Send completion % (Today)</div>
                   <div className="mt-2 text-3xl font-semibold text-foreground">{sendCompletionPercent}%</div>
@@ -819,7 +825,7 @@ const SkeletonDashboard = () => {
                 </div>
               </Card>
               <Card className={`${cardBase} ${cardHover} p-5`}>
-                <div className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full bg-indigo-500/20 blur-3xl" />
+                <div className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full bg-secondary/15 blur-3xl" />
                 <div className="relative">
                   <div className="text-sm text-muted-foreground">Follow-up closure % (This week)</div>
                   <div className="mt-2 text-3xl font-semibold text-foreground">{followUpClosurePercent}%</div>
