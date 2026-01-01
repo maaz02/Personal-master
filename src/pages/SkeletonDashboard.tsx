@@ -4,11 +4,8 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
@@ -18,22 +15,32 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { supabase } from "@/lib/supabaseClient";
+import { FunctionsHttpError } from "@supabase/supabase-js";
+import { Send, CheckCircle2, AlertCircle, Clock, Phone, MessageSquare, Trash2, MoreVertical } from "lucide-react";
 
 type OutboxRow = {
   id: string;
   appointmentId: string;
   patientName: string;
+  service?: string;
   phoneE164?: string;
   dentist: string;
   startIso?: string;
   createdAt: string;
   openedAt?: string;
   sentAt?: string;
-  sendStatus: "ready" | "opened" | "sent" | "needs_review";
+  sendStatus: "ready" | "opened" | "sent" | "done" | "needs_review";
   potentialDuplicate?: boolean;
   messageText?: string;
   waLink?: string;
-  messageType: "confirm" | "reminder_48hr" | "reminder_tomorrow" | "reminder_2h";
+  messageType:
+    | "confirm"
+    | "reminder_48hr"
+    | "reminder_tomorrow"
+    | "reminder_2h"
+    | "book_next_nudge1"
+    | "book_next_nudge2"
+    | "book_next_nudge_manual";
 };
 
 type CancelledFollowUp = {
@@ -43,10 +50,12 @@ type CancelledFollowUp = {
   dentist: string;
   startIso: string;
   followupStatus: "open" | "closed";
+  sendStatus?: "ready" | "done";
   createdAt: string;
   updatedAt?: string;
   aiSummary: string;
   cancelReason: string;
+  phoneE164?: string;
 };
 
 type RescheduleFollowUp = {
@@ -56,6 +65,7 @@ type RescheduleFollowUp = {
   dentist: string;
   currentStartIso: string;
   followupStatus: "open" | "closed";
+  sendStatus?: "ready" | "done";
   createdAt: string;
   updatedAt?: string;
   aiSummary: string;
@@ -63,15 +73,16 @@ type RescheduleFollowUp = {
   note: string;
 };
 
-type NoNextAppointment = {
+type RecallRow = {
   id: string;
   patientName: string;
   dentist: string;
   lastVisitIso: string;
-  status: "pending" | "nudged1" | "nudged" | "nudged2";
-  createdAt: string;
-  updatedAt?: string;
   phoneE164?: string;
+  copyBlock?: string;
+  sendStatus?: "ready" | "done" | "not_needed" | "recalled";
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 type WeeklyEvent = {
@@ -81,7 +92,7 @@ type WeeklyEvent = {
   detail: string;
   status: "open" | "closed";
   date: string;
-  type: "outbox" | "followup" | "no_next";
+  type: "outbox" | "followup" | "recall";
 };
 
 const DUBAI_TZ = "Asia/Dubai";
@@ -104,6 +115,33 @@ const getDubaiDateKeys = (days: number) => {
 const isValidPhone = (value?: string) => {
   const digits = String(value ?? "").replace(/\D/g, "");
   return digits.length >= 9;
+};
+
+const isMissingName = (value?: string) => {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return true;
+  const lower = normalized.toLowerCase();
+  return lower === "unknown" || lower === "there";
+};
+
+const isMissingService = (value?: string) => {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return true;
+  return normalized.toLowerCase() === "unknown";
+};
+
+const displayPatientName = (value?: string) => (isMissingName(value) ? "Missing name" : value ?? "Missing name");
+
+const displayDentistName = (value?: string) => {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return "Unknown";
+  const match = normalized.match(
+    /\bdr\.?\s+[a-z]+(?:\s+(?!is\b|booked\b|today\b|tomorrow\b|at\b|on\b|for\b)[a-z]+)*/i
+  );
+  if (match?.[0]) {
+    return match[0].replace(/\./g, "").replace(/\s+/g, " ").trim();
+  }
+  return normalized;
 };
 
 const DUBAI_OFFSET = "+04:00";
@@ -135,6 +173,27 @@ const to24Hour = (hour: number, ampm?: string) => {
 
 const buildDubaiIso = (dateKey: string, hour24: number, minute: number) => {
   return `${dateKey}T${pad2(hour24)}:${pad2(minute)}:00${DUBAI_OFFSET}`;
+};
+
+const parseServiceFromMessage = (messageText?: string) => {
+  if (!messageText) return undefined;
+  const patterns = [
+    /\bservice\s*[:\-]\s*([^\n.]+)/i,
+    /\btreatment\s*[:\-]\s*([^\n.]+)/i,
+    /\bprocedure\s*[:\-]\s*([^\n.]+)/i,
+    /\bappointment\s+for\s+([^\n.]+?)(?:\s+with|\s+at|\.|\n|$)/i,
+    /\bbooked\s+for\s+([^\n.]+?)(?:\s+with|\s+at|\.|\n|$)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = messageText.match(pattern);
+    if (match?.[1]) {
+      const value = match[1].trim();
+      if (value) return value;
+    }
+  }
+
+  return undefined;
 };
 
 const parseStartIsoFromMessage = (messageText?: string, createdAt?: string) => {
@@ -187,9 +246,13 @@ const parseStartIsoFromMessage = (messageText?: string, createdAt?: string) => {
       const ampm = m[5];
 
       if (month) {
-        // infer year from createdAt (Dubai year)
-        const baseYear = Number(getDubaiDateKey(base).slice(0, 4));
-        const dateKey = `${baseYear}-${pad2(month)}-${pad2(day)}`;
+        // Infer year from createdAt (Dubai year); roll forward if date already passed.
+        const baseKey = getDubaiDateKey(base);
+        const baseYear = Number(baseKey.slice(0, 4));
+        let dateKey = `${baseYear}-${pad2(month)}-${pad2(day)}`;
+        if (dateKey < baseKey) {
+          dateKey = `${baseYear + 1}-${pad2(month)}-${pad2(day)}`;
+        }
         return buildDubaiIso(dateKey, to24Hour(h, ampm), min);
       }
     }
@@ -223,6 +286,12 @@ const messageTypeLabel = (type: OutboxRow["messageType"]) => {
       return "Reminder: tomorrow";
     case "reminder_2h":
       return "Reminder: in 2 hours";
+    case "book_next_nudge1":
+      return "Book next: nudge 1";
+    case "book_next_nudge2":
+      return "Book next: nudge 2";
+    case "book_next_nudge_manual":
+      return "Book next: manual";
     default:
       return type;
   }
@@ -236,21 +305,25 @@ const SkeletonDashboard = () => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmMode, setConfirmMode] = useState<"send" | "done">("send");
   const [activeRowId, setActiveRowId] = useState<string | null>(null);
-  const [editOpen, setEditOpen] = useState(false);
-  const [editSaving, setEditSaving] = useState(false);
-  const [editError, setEditError] = useState<string | null>(null);
-  const [editRow, setEditRow] = useState<OutboxRow | null>(null);
-  const [editForm, setEditForm] = useState({
-    patientName: "",
-    phoneE164: "",
-    messageText: "",
-    waLink: "",
-  });
+  const [fixOpen, setFixOpen] = useState(false);
+  const [fixRow, setFixRow] = useState<OutboxRow | null>(null);
+  const [fixPatientName, setFixPatientName] = useState("");
+  const [fixPhone, setFixPhone] = useState("");
+  const [fixDentist, setFixDentist] = useState("");
+  const [fixService, setFixService] = useState("");
+  const [fixSaving, setFixSaving] = useState(false);
+  const [fixError, setFixError] = useState<string | null>(null);
+  const [contactOpen, setContactOpen] = useState(false);
+  const [contactRow, setContactRow] = useState<CancelledFollowUp | null>(null);
+  const [rescheduleContactOpen, setRescheduleContactOpen] = useState(false);
+  const [rescheduleContactRow, setRescheduleContactRow] = useState<RescheduleFollowUp | null>(null);
+  const [recallContactOpen, setRecallContactOpen] = useState(false);
+  const [recallContactRow, setRecallContactRow] = useState<RecallRow | null>(null);
 
   const [outboxRows, setOutboxRows] = useState<OutboxRow[]>([]);
   const [cancelledFollowUps, setCancelledFollowUps] = useState<CancelledFollowUp[]>([]);
   const [rescheduleFollowUps, setRescheduleFollowUps] = useState<RescheduleFollowUp[]>([]);
-  const [noNextAppointments, setNoNextAppointments] = useState<NoNextAppointment[]>([]);
+  const [recallRows, setRecallRows] = useState<RecallRow[]>([]);
 
   useEffect(() => {
   const fetchTab = async (tab: string) => {
@@ -263,22 +336,42 @@ const SkeletonDashboard = () => {
     return Array.isArray(data?.patients) ? data.patients : [];
   };
 
-  const mapOutbox = (r: any): OutboxRow => ({
-    id: r.naturalKey ?? r.idempotencyKey ?? r.id ?? crypto.randomUUID(),
-    appointmentId: r.appointmentId ?? r.appointment_id ?? "",
-    patientName: r.patientName ?? r.patient_name ?? (r.messageText?.match(/^Hi\s+(.+?),/i)?.[1] ?? "Unknown"),
-    dentist: r.dentist ?? (r.messageText?.match(/\bwith\s+(Dr\s+\w+)/i)?.[1] ?? "Unknown"),
-    phoneE164: r.phoneE164 ?? r.phone_e164 ?? "",
-    startIso:r.startIso ?? r.start_iso ?? parseStartIsoFromMessage(r.messageText, r.createdAt ?? r.created_at),
-    createdAt: r.createdAt ?? r.created_at ?? new Date().toISOString(),
-    openedAt: r.openedAt ?? r.opened_at ?? undefined,
-    sentAt: r.sentAt ?? r.sent_at ?? undefined,
-    sendStatus: (r.sendStatus ?? r.send_status ?? "needs_review") as OutboxRow["sendStatus"],
-    potentialDuplicate: r.potentialDuplicate === true || r.potentialDuplicate === "true",
-    messageText: r.messageText ?? r.message_text ?? "",
-    waLink: r.waLink ?? r.wa_link ?? "",
-    messageType: (r.messageType ?? r.message_type ?? "confirm") as OutboxRow["messageType"],
-  });
+  const mapOutbox = (r: any): OutboxRow => {
+    const rawId = r.idempotencyKey ?? r.naturalKey ?? r.id ?? r.appointmentId ?? r.appointment_id;
+    const normalizedId =
+      typeof rawId === "string" ? rawId.trim() : rawId != null ? String(rawId).trim() : "";
+    const rawAppointmentId = r.appointmentId ?? r.appointment_id ?? "";
+    const normalizedAppointmentId =
+      typeof rawAppointmentId === "string"
+        ? rawAppointmentId.trim()
+        : rawAppointmentId != null
+        ? String(rawAppointmentId).trim()
+        : "";
+
+    return {
+      id: normalizedId || crypto.randomUUID(),
+      appointmentId: normalizedAppointmentId,
+      patientName: r.patientName ?? r.patient_name ?? (r.messageText?.match(/^Hi\s+(.+?),/i)?.[1] ?? "Unknown"),
+      service:
+        r.service ??
+        r.service_name ??
+        r.serviceName ??
+        parseServiceFromMessage(r.messageText ?? r.message_text ?? ""),
+      dentist:
+        r.dentist ??
+        (r.messageText?.match(/\bwith\s+(Dr\s+[A-Za-z]+(?:\s+[A-Za-z]+)*)/i)?.[1] ?? "Unknown"),
+      phoneE164: r.phoneE164 ?? r.phone_e164 ?? "",
+      startIso: r.startIso ?? r.start_iso ?? parseStartIsoFromMessage(r.messageText, r.createdAt ?? r.created_at),
+      createdAt: r.createdAt ?? r.created_at ?? new Date().toISOString(),
+      openedAt: r.openedAt ?? r.opened_at ?? undefined,
+    sentAt: r.sentAt ?? r.sentTime ?? r.sent_at ?? undefined,
+      sendStatus: (r.sendStatus ?? r.send_status ?? "needs_review") as OutboxRow["sendStatus"],
+      potentialDuplicate: r.potentialDuplicate === true || r.potentialDuplicate === "true",
+      messageText: r.messageText ?? r.message_text ?? "",
+      waLink: r.waLink ?? r.wa_link ?? "",
+      messageType: (r.messageType ?? r.message_type ?? "confirm") as OutboxRow["messageType"],
+    };
+  };
 
   const mapCancelled = (r: any): CancelledFollowUp => ({
     id: r.id ?? crypto.randomUUID(),
@@ -287,10 +380,12 @@ const SkeletonDashboard = () => {
     dentist: r.dentist ?? "Unknown",
     startIso: r.start ?? r.startIso ?? "",
     followupStatus: (r.status ?? r.followupStatus ?? "open") as CancelledFollowUp["followupStatus"],
+    sendStatus: (r.sendStatus ?? r.send_status ?? "ready") as CancelledFollowUp["sendStatus"],
     createdAt: r.createdAt ?? new Date().toISOString(),
     updatedAt: r.updatedAt ?? r.updated_at ?? undefined,
     cancelReason: r.cancelReason ?? r.cancel_reason ?? "",
     aiSummary: r.aiSummary ?? r.ai_summary ?? "",
+    phoneE164: r.phoneE164 ?? r.phone_e164 ?? r.phone ?? "",
   });
 
 
@@ -301,38 +396,40 @@ const SkeletonDashboard = () => {
     dentist: r.dentist ?? "Unknown",
     currentStartIso: r.currentStart ?? r.current_start_iso ?? "",
     followupStatus: (r.followupStatus ?? r.followup_status ?? "open") as RescheduleFollowUp["followupStatus"],
+    sendStatus: (r.sendStatus ?? r.send_status ?? "ready") as RescheduleFollowUp["sendStatus"],
     createdAt: r.createdAt ?? r.created_at ?? new Date().toISOString(),
     updatedAt: r.updatedAt ?? r.updated_at ?? undefined,
     note: r.note ?? "",
     aiSummary: r.aiSummary ?? r.ai_summary ?? "",
-    phoneE164: r.phone ?? "",
+    phoneE164: r.phoneE164 ?? r.phone_e164 ?? r.phone ?? "",
   });
 
-  const mapNoNext = (r: any): NoNextAppointment => ({
-    id: r.id ?? crypto.randomUUID(),
+  const mapRecall = (r: any): RecallRow => ({
+    id: r.id ?? r.idempotencyKey ?? r.idempotency_key ?? crypto.randomUUID(),
     patientName: r.patientName ?? r.patient_name ?? "Unknown",
-    phoneE164: r.phoneE164 ?? "",
+    phoneE164: r.phoneE164 ?? r.phone_e164 ?? r.phone ?? "",
     dentist: r.dentist ?? "Unknown",
     lastVisitIso: r.lastVisitIso ?? r.last_visit_iso ?? "",
-    status: (r.status ?? "pending") as NoNextAppointment["status"],
+    copyBlock: r.copyBlock ?? r.copy_block ?? "",
+    sendStatus: (r.sendStatus ?? r.send_status ?? "ready") as RecallRow["sendStatus"],
     createdAt: r.createdAt ?? r.created_at ?? new Date().toISOString(),
     updatedAt: r.updatedAt ?? r.updated_at ?? undefined,
   });
 
   const loadAll = async () => {
     try {
-      const [outboxRaw, confirmedRaw, cancelledRaw, rescheduleRaw, noNextRaw] = await Promise.all([
+      const [outboxRaw, confirmedRaw, cancelledRaw, rescheduleRaw, recallRaw] = await Promise.all([
         fetchTab("Outbox"),
         fetchTab("Confirmed"),
         fetchTab("CancelledFollowUp"),
         fetchTab("RescheduleFollowUp"),
-        fetchTab("NoNextAppointment"), // ⚠️ must match your EXACT sheet tab name
+        fetchTab("Recall"), // ⚠️ must match your EXACT sheet tab name
       ]);
 
       setOutboxRows(outboxRaw.map(mapOutbox));
       setCancelledFollowUps(cancelledRaw.map(mapCancelled));
       setRescheduleFollowUps(rescheduleRaw.map(mapReschedule));
-      setNoNextAppointments(noNextRaw.map(mapNoNext));
+      setRecallRows(recallRaw.map(mapRecall));
     } catch (e) {
       console.error("Load sheets error:", e);
     }
@@ -369,10 +466,10 @@ const SkeletonDashboard = () => {
       id: "week-3",
       patientName: "Maaz",
       dentist: "Dr Ahmed",
-      detail: "No next pending",
+      detail: "Recall pending",
       status: "open",
       date: "2025-12-17T08:10:00.000Z",
-      type: "no_next",
+      type: "recall",
     },
   ];
 
@@ -398,13 +495,19 @@ const SkeletonDashboard = () => {
   const sendNowRows = useMemo(() => {
     return outboxRows
       .filter((row) => {
+        const hasName = !isMissingName(row.patientName);
+        const hasDentist = Boolean(row.dentist) && row.dentist !== "Unknown";
+        const hasService = !isMissingService(row.service);
         return (
           (row.sendStatus === "ready" || row.sendStatus === "needs_review")
  &&
           !row.potentialDuplicate &&
           isValidPhone(row.phoneE164) &&
           Boolean(row.waLink) &&
-          Boolean(row.messageText)
+          Boolean(row.messageText) &&
+          hasName &&
+          hasDentist &&
+          hasService
         );
       })
       .sort((a, b) => {
@@ -416,16 +519,23 @@ const SkeletonDashboard = () => {
 
   const needsReviewRows = useMemo(() => {
     const priority = (row: OutboxRow) => {
-      if (!isValidPhone(row.phoneE164)) return 1;
-      if (row.potentialDuplicate) return 2;
-      if (!row.waLink || !row.messageText) return 3;
-      return 4;
+      if (isMissingName(row.patientName)) return 1;
+      if (!row.dentist || row.dentist === "Unknown") return 2;
+      if (isMissingService(row.service)) return 3;
+      if (!isValidPhone(row.phoneE164)) return 4;
+      if (row.potentialDuplicate) return 5;
+      if (!row.waLink || !row.messageText) return 6;
+      return 7;
     };
     return outboxRows
       .filter((row) => {
         return (
           row.sendStatus === "needs_review" ||
           row.potentialDuplicate ||
+          isMissingName(row.patientName) ||
+          !row.dentist ||
+          row.dentist === "Unknown" ||
+          isMissingService(row.service) ||
           !isValidPhone(row.phoneE164) ||
           !row.waLink ||
           !row.messageText
@@ -439,19 +549,20 @@ const SkeletonDashboard = () => {
   }, [outboxRows]);
 
   const completedTodayRows = useMemo(() => {
-    return outboxRows.filter((row) => row.sendStatus === "sent" && isToday(row.sentAt));
+    return outboxRows.filter((row) => row.sendStatus === "sent" && Boolean(row.sentAt) && isToday(row.sentAt));
   }, [outboxRows, todayKey]);
 
-  const openedCount = useMemo(() => {
-    return outboxRows.filter((row) => row.sendStatus === "opened").length;
-  }, [outboxRows]);
+  const cancelledOpen = cancelledFollowUps.filter(
+    (row) => row.followupStatus === "open" && row.sendStatus === "ready"
+  );
+  const rescheduleOpen = rescheduleFollowUps.filter(
+    (row) => row.followupStatus === "open" && row.sendStatus === "ready"
+  );
+  const recallOpen = recallRows.filter(
+    (row) => row.sendStatus !== "done" && row.sendStatus !== "not_needed" && row.sendStatus !== "recalled"
+  );
 
-  const cancelledOpen = cancelledFollowUps.filter((row) => row.followupStatus === "open");
-  const rescheduleOpen = rescheduleFollowUps.filter((row) => row.followupStatus === "open");
-  const noNextOpen = noNextAppointments.filter((row) => row.status === "pending" || row.status === "nudged" || row.status === "nudged1" || row.status === "nudged2");
-
-
-  const followUpCount = cancelledOpen.length + rescheduleOpen.length + noNextOpen.length;
+  const followUpCount = cancelledOpen.length + rescheduleOpen.length + recallOpen.length;
 
   const followUpOverdue = [...cancelledOpen, ...rescheduleOpen].filter((row) => {
     const updatedAt = toDate(row.updatedAt || row.createdAt);
@@ -459,19 +570,7 @@ const SkeletonDashboard = () => {
     return Date.now() - updatedAt.getTime() > 2 * 24 * 60 * 60 * 1000;
   }).length;
 
-  const noNextOverdue = noNextOpen.filter((row) => {
-    const lastVisit = toDate(row.lastVisitIso);
-    if (!lastVisit) return false;
-    return Date.now() - lastVisit.getTime() > 7 * 24 * 60 * 60 * 1000;
-  }).length;
-
-  const followUpOverdueCount = followUpOverdue + noNextOverdue;
-
-  const sendCompletionPercent = useMemo(() => {
-    const total = sendNowRows.length + openedCount + completedTodayRows.length;
-    if (total === 0) return 0;
-    return Math.round((completedTodayRows.length / total) * 100);
-  }, [sendNowRows.length, openedCount, completedTodayRows.length]);
+  const followUpOverdueCount = followUpOverdue;
 
   const weeklyWindow = useMemo(() => {
     const keys = new Set(getDubaiDateKeys(7));
@@ -480,78 +579,6 @@ const SkeletonDashboard = () => {
 
   const weeklyClosed = weeklyWindow.filter((row) => row.status === "closed").length;
   const weeklyTotal = weeklyWindow.length;
-  const followUpClosurePercent = weeklyTotal === 0 ? 0 : Math.round((weeklyClosed / weeklyTotal) * 100);
-
-  const allPatients = useMemo(() => {
-    const statusPriority: Record<string, number> = {
-      "Follow-up open": 1,
-      "No next pending": 2,
-      "Needs review": 3,
-      "Outbox open": 4,
-      Completed: 5,
-    };
-
-    const map = new Map<
-      string,
-      {
-        name: string;
-        lastActivity: string;
-        lastActivityMs: number;
-        status: string;
-      }
-    >();
-
-    const update = (name: string, activity: string, status: string) => {
-      if (!name) return;
-      const activityMs = Number.isFinite(new Date(activity).getTime())
-        ? new Date(activity).getTime()
-        : 0;
-      const current = map.get(name);
-      if (!current) {
-        map.set(name, { name, lastActivity: activity, lastActivityMs: activityMs, status });
-        return;
-      }
-      const nextActivity = activityMs > current.lastActivityMs ? activity : current.lastActivity;
-      const nextActivityMs = Math.max(activityMs, current.lastActivityMs);
-      const nextStatus =
-        statusPriority[status] < statusPriority[current.status] ? status : current.status;
-      map.set(name, {
-        ...current,
-        lastActivity: nextActivity,
-        lastActivityMs: nextActivityMs,
-        status: nextStatus,
-      });
-    };
-
-    outboxRows.forEach((row) => {
-      const activity = row.sentAt || row.openedAt || row.createdAt;
-      let status = "Outbox open";
-      if (row.sendStatus === "needs_review") status = "Needs review";
-      if (row.sendStatus === "sent") status = "Completed";
-      update(row.patientName, activity, status);
-    });
-
-    cancelledFollowUps.forEach((row) => {
-      const activity = row.updatedAt || row.createdAt;
-      const status = row.followupStatus === "open" ? "Follow-up open" : "Completed";
-      update(row.patientName, activity, status);
-    });
-
-    rescheduleFollowUps.forEach((row) => {
-      const activity = row.updatedAt || row.createdAt;
-      const status = row.followupStatus === "open" ? "Follow-up open" : "Completed";
-      update(row.patientName, activity, status);
-    });
-
-    noNextAppointments.forEach((row) => {
-      const activity = row.updatedAt || row.createdAt;
-      const status = row.status === "pending" || row.status === "nudged" ? "No next pending" : "Completed";
-      update(row.patientName, activity, status);
-    });
-
-    return Array.from(map.values()).sort((a, b) => b.lastActivityMs - a.lastActivityMs);
-  }, [outboxRows, cancelledFollowUps, rescheduleFollowUps, noNextAppointments]);
-
   const countBubble = (count: number) =>
     count > 0 ? (
       <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary/10 px-1 text-xs font-semibold text-primary ring-1 ring-primary/20">
@@ -564,67 +591,229 @@ const SkeletonDashboard = () => {
     navigator.clipboard?.writeText(value).catch(() => undefined);
   };
 
-  const openEditDetails = (row: OutboxRow) => {
-    setEditRow(row);
-    setEditForm({
-      patientName: row.patientName ?? "",
-      phoneE164: row.phoneE164 ?? "",
-      messageText: row.messageText ?? "",
-      waLink: row.waLink ?? "",
-    });
-    setEditError(null);
-    setEditOpen(true);
-  };
-
-  const handleEditChange = (field: keyof typeof editForm, value: string) => {
-    setEditForm((prev) => ({ ...prev, [field]: value }));
-  };
-
   const updateOutboxRow = (id: string, updater: (row: OutboxRow) => OutboxRow) => {
     setOutboxRows((prev) => prev.map((row) => (row.id === id ? updater(row) : row)));
   };
 
-  const saveEditDetails = async () => {
-    if (!editRow) return;
-    if (!editRow.appointmentId) {
-      setEditError("Missing appointment ID. Unable to update the sheet.");
+  const updateRecallRow = (id: string, updater: (row: RecallRow) => RecallRow) => {
+    setRecallRows((prev) => prev.map((row) => (row.id === id ? updater(row) : row)));
+  };
+
+  const persistOutboxUpdates = async (row: OutboxRow, updates: Record<string, unknown>) => {
+    const lookupKey = row.id || row.appointmentId;
+    if (!lookupKey) {
+      console.warn("Missing row identifier. Unable to update the sheet.", row);
       return;
     }
-
-    setEditSaving(true);
-    setEditError(null);
-    const updates = {
-      patient_name: editForm.patientName,
-      phone_e164: editForm.phoneE164,
-      message_text: editForm.messageText,
-      wa_link: editForm.waLink,
-    };
 
     const { error } = await supabase.functions.invoke("update_patient", {
       body: {
         tab: "Outbox",
-        appointment_id: editRow.appointmentId,
+        appointment_id: lookupKey,
+        updates: {
+          idempotencyKey: row.id,
+          appointmentId: row.appointmentId,
+          ...updates,
+        },
+      },
+    });
+
+    if (error) {
+      console.error("Failed to update Outbox row:", error);
+    }
+  };
+
+  const persistCancelledFollowUpUpdates = async (
+    row: CancelledFollowUp,
+    updates: Record<string, unknown>
+  ) => {
+    const lookupKey = row.appointmentId || row.id;
+    if (!lookupKey) {
+      console.warn("Missing follow-up identifier. Unable to update the sheet.", row);
+      return;
+    }
+
+    const { error } = await supabase.functions.invoke("update_patient", {
+      body: {
+        tab: "CancelledFollowUp",
+        appointment_id: lookupKey,
         updates,
       },
     });
 
     if (error) {
-      setEditError(error.message || "Failed to update Google Sheet.");
-      setEditSaving(false);
+      console.error("Failed to update CancelledFollowUp row:", error);
+    }
+  };
+
+  const persistRescheduleFollowUpUpdates = async (
+    row: RescheduleFollowUp,
+    updates: Record<string, unknown>
+  ) => {
+    const lookupKey = row.appointmentId || row.id;
+    if (!lookupKey) {
+      console.warn("Missing follow-up identifier. Unable to update the sheet.", row);
       return;
     }
 
-    updateOutboxRow(editRow.id, (current) => ({
-      ...current,
-      patientName: editForm.patientName,
-      phoneE164: editForm.phoneE164,
-      messageText: editForm.messageText,
-      waLink: editForm.waLink,
-    }));
-    setEditSaving(false);
-    setEditOpen(false);
-    setEditRow(null);
+    const { error } = await supabase.functions.invoke("update_patient", {
+      body: {
+        tab: "RescheduleFollowUp",
+        appointment_id: lookupKey,
+        updates,
+      },
+    });
+
+    if (error) {
+      console.error("Failed to update RescheduleFollowUp row:", error);
+    }
   };
+
+  const persistRecallUpdates = async (row: RecallRow, updates: Record<string, unknown>) => {
+    const lookupKey = row.id;
+    if (!lookupKey) {
+      console.warn("Missing recall identifier. Unable to update the sheet.", row);
+      return;
+    }
+
+    const { error } = await supabase.functions.invoke("update_patient", {
+      body: {
+        tab: "Recall",
+        appointment_id: lookupKey,
+        updates,
+      },
+    });
+
+    if (error) {
+      console.error("Failed to update Recall row:", error);
+    }
+  };
+
+  const openFixDetails = (row: OutboxRow) => {
+    setFixRow(row);
+    setFixPatientName(isMissingName(row.patientName) ? "" : row.patientName ?? "");
+    setFixPhone(row.phoneE164 ?? "");
+    setFixDentist(row.dentist === "Unknown" ? "" : row.dentist ?? "");
+    setFixService(isMissingService(row.service) ? "" : row.service ?? "");
+    setFixError(null);
+    setFixOpen(true);
+  };
+
+  const submitFixDetails = async () => {
+    if (!fixRow) return;
+    const eventId = fixRow.appointmentId?.trim();
+    if (!eventId) {
+      setFixError("Missing appointment ID. Unable to update the calendar.");
+      return;
+    }
+
+    const payload = {
+      eventId,
+      patientName: fixPatientName.trim(),
+      phone: fixPhone.trim(),
+      dentist: fixDentist.trim(),
+      service: fixService.trim(),
+    };
+
+    setFixSaving(true);
+    setFixError(null);
+
+    try {
+      const { error } = await supabase.functions.invoke("fix_calendar_appointment", {
+        body: payload,
+      });
+
+      if (error) {
+        if (error instanceof FunctionsHttpError) {
+          const details = await error.context.json().catch(() => null);
+          const message = details?.error ?? details?.message ?? error.message;
+          setFixError(typeof message === "string" ? message : JSON.stringify(message));
+        } else {
+          setFixError(error.message);
+        }
+        return;
+      }
+
+      const trimmedUpdates = {
+        patientName: fixPatientName.trim(),
+        phoneE164: fixPhone.trim(),
+        dentist: fixDentist.trim(),
+        service: fixService.trim(),
+      };
+
+      updateOutboxRow(fixRow.id, (current) => ({
+        ...current,
+        ...trimmedUpdates,
+      }));
+      persistOutboxUpdates(fixRow, trimmedUpdates);
+
+      setFixOpen(false);
+      setFixRow(null);
+    } catch (err) {
+      setFixError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFixSaving(false);
+    }
+  };
+
+  const openContactDialog = (row: CancelledFollowUp) => {
+    setContactRow(row);
+    setContactOpen(true);
+  };
+
+  const openRescheduleContactDialog = (row: RescheduleFollowUp) => {
+    setRescheduleContactRow(row);
+    setRescheduleContactOpen(true);
+  };
+
+  const openRecallContactDialog = (row: RecallRow) => {
+    setRecallContactRow(row);
+    setRecallContactOpen(true);
+  };
+
+  const handleRecallNotNeeded = (row: RecallRow) => {
+    const updatedAt = new Date().toISOString();
+    updateRecallRow(row.id, (current) => ({ ...current, sendStatus: "not_needed", updatedAt }));
+    persistRecallUpdates(row, { sendStatus: "not_needed", updatedAt });
+  };
+
+  const handleRecallDone = (row: RecallRow) => {
+    const updatedAt = new Date().toISOString();
+    updateRecallRow(row.id, (current) => ({ ...current, sendStatus: "recalled", updatedAt }));
+    persistRecallUpdates(row, { sendStatus: "recalled", updatedAt });
+    setRecallContactOpen(false);
+  };
+
+  const handleCancelledDone = (row: CancelledFollowUp) => {
+    const updatedAt = new Date().toISOString();
+    setCancelledFollowUps((prev) =>
+      prev.map((item) =>
+        item.id === row.id
+          ? { ...item, followupStatus: "closed", sendStatus: "done", updatedAt }
+          : item
+      )
+    );
+    persistCancelledFollowUpUpdates(row, {
+      followupStatus: "closed",
+      status: "closed",
+      sendStatus: "done",
+      updatedAt,
+    });
+  };
+
+  const handleRescheduleDone = (row: RescheduleFollowUp) => {
+    const updatedAt = new Date().toISOString();
+    setRescheduleFollowUps((prev) =>
+      prev.map((item) =>
+        item.id === row.id ? { ...item, sendStatus: "done", updatedAt } : item
+      )
+    );
+    persistRescheduleFollowUpUpdates(row, {
+      sendStatus: "done",
+      updatedAt,
+    });
+  };
+
 
   const handleSendClick = (row: OutboxRow) => {
     if (row.waLink) {
@@ -647,29 +836,41 @@ const SkeletonDashboard = () => {
   };
 
   const handleConfirmSent = () => {
-    if (!activeRowId) return;
+    if (activeRowId === null) return;
+    const sentAt = new Date().toISOString();
     updateOutboxRow(activeRowId, (current) => ({
       ...current,
       sendStatus: "sent",
-      sentAt: new Date().toISOString(),
+      sentAt,
     }));
+    const row = outboxRows.find((item) => item.id === activeRowId);
+    if (row) {
+      persistOutboxUpdates(row, { sendStatus: "sent", sentTime: sentAt });
+    }
     setConfirmOpen(false);
     setActiveRowId(null);
     setActiveTab("completed");
   };
 
   const handleConfirmNotSent = () => {
-    if (!activeRowId) return;
+    if (activeRowId === null) return;
     updateOutboxRow(activeRowId, (current) => ({
       ...current,
       sendStatus: "ready",
       openedAt: undefined,
     }));
+    const row = outboxRows.find((item) => item.id === activeRowId);
+    if (row) {
+      persistOutboxUpdates(row, { sendStatus: "ready" });
+    }
     setConfirmOpen(false);
     setActiveRowId(null);
   };
 
   const getReviewReason = (row: OutboxRow) => {
+    if (isMissingName(row.patientName)) return "Missing name";
+    if (!row.dentist || row.dentist === "Unknown") return "Missing dentist";
+    if (isMissingService(row.service)) return "Missing service";
     if (!isValidPhone(row.phoneE164)) return "Missing phone";
     if (row.potentialDuplicate) return "Duplicate";
     if (!row.waLink || !row.messageText) return "Missing details";
@@ -677,313 +878,331 @@ const SkeletonDashboard = () => {
   };
 
   const cardBase =
-    "relative overflow-hidden rounded-2xl border border-border bg-card shadow-[0_18px_40px_rgba(15,30,59,0.08)]";
+    "relative overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_4px_16px_rgba(0,0,0,0.08)]";
   const cardHover =
-    "transition-all duration-300 hover:-translate-y-0.5 hover:shadow-[0_22px_50px_rgba(15,30,59,0.12)]";
+    "transition-all duration-300 hover:shadow-[0_16px_40px_rgba(0,0,0,0.12)] hover:border-slate-300";
   const rowCard =
-    "group relative rounded-xl border border-border bg-card/90 transition-all duration-200 hover:border-primary/30 hover:bg-white hover:shadow-[0_14px_30px_rgba(15,30,59,0.12)]";
+    "group relative rounded-2xl border border-slate-200 bg-white animate-row-enter transition-all duration-200 hover:border-blue-300 hover:shadow-[0_12px_28px_rgba(0,0,0,0.1)]";
   const tabListBase =
-    "flex flex-wrap gap-1.5 justify-start rounded-full border border-border bg-white/70 p-1.5 shadow-[0_10px_22px_rgba(15,30,59,0.08)] backdrop-blur";
-  const tileCard = `${cardBase} ${cardHover} group p-5 before:pointer-events-none before:absolute before:inset-0 before:opacity-0 before:transition-opacity before:duration-300 before:content-[''] before:bg-[radial-gradient(120%_100%_at_80%_0%,rgba(74,179,244,0.18),transparent_60%)] hover:before:opacity-100`;
+    "inline-flex h-auto flex-wrap items-center gap-1.5 rounded-full border border-slate-200 bg-slate-100/80 p-1.5 shadow-sm backdrop-blur-sm";
+  const tabTriggerBase =
+    "rounded-full px-4 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-white/70 data-[state=active]:text-white";
+  const tileCard = `${cardBase} ${cardHover} group p-6 before:pointer-events-none before:absolute before:inset-0 before:opacity-0 before:transition-opacity before:duration-300 before:content-[''] before:bg-[radial-gradient(120%_100%_at_80%_0%,rgba(59,130,246,0.12),transparent_60%)] hover:before:opacity-100`;
+  const rowDelayStyle = (index: number) => ({
+    animationDelay: `${Math.min(index, 10) * 60}ms`,
+  });
 
   const showWeekTab = timeRange === "7d";
 
   return (
-    <div className="app-theme relative min-h-screen overflow-hidden bg-background text-foreground">
-      <div className="pointer-events-none absolute -top-32 right-0 h-72 w-72 rounded-full bg-primary/15 blur-[120px]" />
-      <div className="pointer-events-none absolute -bottom-40 left-0 h-96 w-96 rounded-full bg-secondary/20 blur-[140px]" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_40%_at_50%_0%,rgba(74,179,244,0.2),transparent_60%)]" />
-      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(120deg,rgba(47,91,234,0.12),transparent_45%)]" />
-      <div className="pointer-events-none absolute inset-0 opacity-25 [background-image:radial-gradient(rgba(47,91,234,0.12)_1px,transparent_0)] [background-size:22px_22px] [mask-image:radial-gradient(70%_60%_at_50%_20%,black,transparent)]" />
-      <div className="pointer-events-none absolute left-1/2 top-24 h-64 w-[860px] -translate-x-1/2 rounded-full bg-gradient-to-r from-transparent via-primary/15 to-transparent blur-[120px]" />
+    <div className="app-theme relative min-h-screen overflow-hidden bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-50 text-foreground">
+      <div className="pointer-events-none absolute -top-40 right-1/4 h-80 w-80 rounded-full bg-blue-100/40 blur-[100px]" />
+      <div className="pointer-events-none absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-cyan-100/30 blur-[100px]" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_40%_at_50%_0%,rgba(191,219,254,0.15),transparent_50%)]" />
 
       <div className="relative z-10">
-        <div className="relative border-b border-border bg-white/80 backdrop-blur-xl">
-          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent" />
-          <div className="container mx-auto flex flex-col gap-3 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex items-center gap-3">
-              <div className="text-lg font-semibold text-foreground">
-                Clinic Appointments{" "}
-                <span className="bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
-                  Dashboard
+        <div className="relative border-b border-slate-200 bg-white/95 backdrop-blur-sm shadow-[0_2px_8px_rgba(0,0,0,0.04)]">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-blue-200/40 to-transparent" />
+          <div className="container mx-auto flex flex-col gap-4 px-4 py-6 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-col gap-1">
+              <div className="text-3xl font-extrabold text-slate-900">
+                Appointment{" "}
+                <span className="bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">
+                  Hub
                 </span>
               </div>
-              <Badge variant="outline" className="border-primary/40 text-primary">
-                Placeholder
-              </Badge>
+              <p className="text-sm font-medium text-slate-600">Manage appointments and follow-ups efficiently</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <Select value={timeRange} onValueChange={setTimeRange}>
-                <SelectTrigger className="w-40 border-border bg-white">
+                <SelectTrigger className="w-40 border-slate-200 bg-white rounded-xl font-medium">
                   <SelectValue placeholder="Range" />
                 </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="today">Today</SelectItem>
-                  <SelectItem value="7d">7 days</SelectItem>
-                  <SelectItem value="30d">30 days</SelectItem>
-                </SelectContent>
+              <SelectContent>
+                <SelectItem value="today">Today</SelectItem>
+                <SelectItem value="7d">Last 7 days</SelectItem>
+                <SelectItem value="30d">Last 30 days</SelectItem>
+              </SelectContent>
               </Select>
-              <Button variant="outline" onClick={() => navigate("/auth")}>
+              <Button variant="outline" onClick={() => navigate("/auth")} className="rounded-xl border-slate-200 font-medium hover:bg-slate-50 hover:border-slate-300">
                 Sign out
               </Button>
             </div>
           </div>
         </div>
 
-        <main className="container mx-auto px-4 py-10 animate-in fade-in duration-500">
-          <div className="grid gap-6">
+        <main className="container mx-auto px-4 py-8 animate-in fade-in duration-500">
+          <div className="grid gap-8">
             <div>
-              <h2 className="text-lg font-semibold text-foreground">
-                Front desk{" "}
-                <span className="bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
-                  overview
+              <h2 className="text-2xl font-extrabold text-slate-900">
+                Activity{" "}
+                <span className="bg-gradient-to-r from-blue-600 to-blue-500 bg-clip-text text-transparent">
+                  Overview
                 </span>
               </h2>
-              <p className="text-sm text-muted-foreground">Keep the queue moving with clear, single actions.</p>
+              <p className="text-sm font-medium text-slate-600 mt-2">Track your dashboard metrics at a glance</p>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
               <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "0ms" }}>
-                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-primary/20 blur-3xl" />
-                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-secondary/25 blur-3xl" />
-                <div className="relative flex flex-col gap-3">
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>Send now</span>
+                <div className="pointer-events-none absolute -right-12 -top-12 h-32 w-32 rounded-full bg-blue-200/30 blur-2xl" />
+                <div className="relative flex flex-col gap-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-slate-700">Ready to Send</span>
+                    <div className="rounded-full bg-blue-100 p-2.5 text-blue-600">
+                      <Send size={18} />
+                    </div>
                   </div>
                   <div className="flex items-end justify-between">
-                    <div className="text-3xl font-semibold text-foreground">{sendNowRows.length}</div>
-                    <Button size="sm" className="btn-gradient rounded-full px-4" onClick={() => setActiveTab("send")}>
-                      Open
+                    <div className="text-3xl font-extrabold text-slate-900">{sendNowRows.length}</div>
+                    <Button size="sm" className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white px-4 font-semibold" onClick={() => setActiveTab("send")}>
+                      Send
                     </Button>
                   </div>
-                  <div className="text-xs text-muted-foreground">Ready to send now</div>
+                  <div className="text-xs font-medium text-slate-600">Messages ready to dispatch</div>
                 </div>
               </Card>
-              <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "80ms" }}>
-                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-secondary/20 blur-3xl" />
-                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-primary/15 blur-3xl" />
-                <div className="relative flex flex-col gap-3">
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>Sent today</span>
-                  </div>
-                  <div className="flex items-end justify-between">
-                    <div className="text-3xl font-semibold text-foreground">{completedTodayRows.length}</div>
-                    <Button size="sm" className="btn-gradient rounded-full px-4" onClick={() => setActiveTab("completed")}>
-                      Open
-                    </Button>
-                  </div>
-                  <div className="text-xs text-muted-foreground">Done and recorded</div>
-                </div>
-              </Card>
-              <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "160ms" }}>
-                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-primary/20 blur-3xl" />
-                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-secondary/20 blur-3xl" />
-                <div className="relative flex flex-col gap-3">
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>Follow-ups</span>
-                    {followUpOverdueCount > 0 ? (
-                      <Badge variant="outline">Overdue {followUpOverdueCount}</Badge>
-                    ) : null}
-                  </div>
-                  <div className="flex items-end justify-between">
-                    <div className="text-3xl font-semibold text-foreground">{followUpCount}</div>
-                    <Button size="sm" className="btn-gradient rounded-full px-4" onClick={() => setActiveTab("followups")}>
-                      Open
-                    </Button>
-                  </div>
-                  <div className="text-xs text-muted-foreground">Cancelled + reschedule + no next</div>
-                </div>
-              </Card>
-              <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "240ms" }}>
-                <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-primary/15 blur-3xl" />
-                <div className="pointer-events-none absolute -bottom-12 -left-10 h-28 w-28 rounded-full bg-primary/10 blur-3xl" />
-                <div className="relative flex flex-col gap-3">
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>Needs review</span>
-                  </div>
-                  <div className="flex items-end justify-between">
-                    <div className="text-3xl font-semibold text-foreground">{needsReviewRows.length}</div>
-                    <Button size="sm" className="btn-gradient rounded-full px-4" onClick={() => setActiveTab("review")}>
-                      Open
-                    </Button>
-                  </div>
-                  <div className="text-xs text-muted-foreground">Fix missing details</div>
-                </div>
-              </Card>
-            </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
-              <Card className={`${cardBase} ${cardHover} p-5`}>
-                <div className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full bg-primary/15 blur-3xl" />
-                <div className="relative">
-                  <div className="text-sm text-muted-foreground">Send completion % (Today)</div>
-                  <div className="mt-2 text-3xl font-semibold text-foreground">{sendCompletionPercent}%</div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {completedTodayRows.length}/
-                    {sendNowRows.length + openedCount + completedTodayRows.length} sent
+              <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "80ms" }}>
+                <div className="pointer-events-none absolute -right-12 -top-12 h-32 w-32 rounded-full bg-green-200/30 blur-2xl" />
+                <div className="relative flex flex-col gap-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-slate-700">Sent Today</span>
+                    <div className="rounded-full bg-green-100 p-2.5 text-green-600">
+                      <CheckCircle2 size={18} />
+                    </div>
+                  </div>
+                  <div className="flex items-end justify-between">
+                    <div className="text-3xl font-extrabold text-slate-900">{completedTodayRows.length}</div>
+                    <Button size="sm" className="rounded-xl bg-green-600 hover:bg-green-700 text-white px-4 font-semibold" onClick={() => setActiveTab("completed")}>
+                      View
+                    </Button>
+                  </div>
+                  <div className="text-xs font-medium text-slate-600">Successfully completed</div>
+                </div>
+              </Card>
+
+              <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "160ms" }}>
+                <div className="pointer-events-none absolute -right-12 -top-12 h-32 w-32 rounded-full bg-orange-200/30 blur-2xl" />
+                <div className="relative flex flex-col gap-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-slate-700">Follow-ups</span>
+                    <div className="rounded-full bg-orange-100 p-2.5 text-orange-600">
+                      <Clock size={18} />
+                    </div>
+                  </div>
+                  <div className="flex items-end justify-between">
+                    <div className="text-3xl font-extrabold text-slate-900">{followUpCount}</div>
+                    <Button size="sm" className="rounded-xl bg-orange-600 hover:bg-orange-700 text-white px-4 font-semibold" onClick={() => setActiveTab("followups")}>
+                      Manage
+                    </Button>
+                  </div>
+                  <div className="text-xs font-medium text-slate-600">
+                    {followUpOverdueCount > 0 ? `${followUpOverdueCount} overdue` : "All on track"}
                   </div>
                 </div>
               </Card>
-              <Card className={`${cardBase} ${cardHover} p-5`}>
-                <div className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full bg-secondary/15 blur-3xl" />
-                <div className="relative">
-                  <div className="text-sm text-muted-foreground">Follow-up closure % (This week)</div>
-                  <div className="mt-2 text-3xl font-semibold text-foreground">{followUpClosurePercent}%</div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {weeklyClosed}/{weeklyTotal} closed
+
+              <Card className={`${tileCard} animate-fade-in-up`} style={{ animationDelay: "240ms" }}>
+                <div className="pointer-events-none absolute -right-12 -top-12 h-32 w-32 rounded-full bg-red-200/30 blur-2xl" />
+                <div className="relative flex flex-col gap-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-slate-700">Review Needed</span>
+                    <div className="rounded-full bg-red-100 p-2.5 text-red-600">
+                      <AlertCircle size={18} />
+                    </div>
                   </div>
+                  <div className="flex items-end justify-between">
+                    <div className="text-3xl font-extrabold text-slate-900">{needsReviewRows.length}</div>
+                    <Button size="sm" className="rounded-xl bg-red-600 hover:bg-red-700 text-white px-4 font-semibold" onClick={() => setActiveTab("review")}>
+                      Review
+                    </Button>
+                  </div>
+                  <div className="text-xs font-medium text-slate-600">Issues to resolve</div>
                 </div>
               </Card>
             </div>
 
             <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
               <TabsList className={tabListBase}>
-                <TabsTrigger value="send">Send now</TabsTrigger>
-                <TabsTrigger value="followups">Follow-ups</TabsTrigger>
-                <TabsTrigger value="review">Needs review</TabsTrigger>
-                <TabsTrigger value="completed">Completed today</TabsTrigger>
-                {showWeekTab ? <TabsTrigger value="week">This week</TabsTrigger> : null}
-                <TabsTrigger value="patients">All patients</TabsTrigger>
+                <TabsTrigger value="send" className={`${tabTriggerBase} data-[state=active]:bg-blue-600`}>Send now</TabsTrigger>
+                <TabsTrigger value="followups" className={`${tabTriggerBase} data-[state=active]:bg-orange-600`}>Follow-ups</TabsTrigger>
+                <TabsTrigger value="review" className={`${tabTriggerBase} data-[state=active]:bg-red-600`}>Review</TabsTrigger>
+                <TabsTrigger value="completed" className={`${tabTriggerBase} data-[state=active]:bg-green-600`}>Completed</TabsTrigger>
+                {showWeekTab ? (
+                  <TabsTrigger value="week" className={`${tabTriggerBase} data-[state=active]:bg-purple-600`}>This week</TabsTrigger>
+                ) : null}
               </TabsList>
 
               <TabsContent value="send" className="animate-in fade-in slide-in-from-bottom-2 duration-300">
-                <Card className={`${cardBase} p-6`}>
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <h3 className="text-lg font-semibold text-foreground">Send now</h3>
-                  </div>
-                  <p className="mt-1 text-sm text-muted-foreground">Tap Send WhatsApp, then mark as done.</p>
-                  <div className="mt-4 grid gap-3">
-                    {sendNowRows.map((row) => (
-                      <div
-                        key={row.id}
-                        className={`${rowCard} flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between`}
-                      >
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="text-base font-semibold text-foreground">{row.patientName}</div>
-                            <Badge variant="secondary">{messageTypeLabel(row.messageType)}</Badge>
-                          </div>
-                          <div className="mt-1 text-sm text-muted-foreground">
-                            {row.dentist} - {new Date(row.startIso || row.createdAt).toLocaleString()}
-                          </div>
+                <Card className={`${cardBase} p-8`}>
+                  <div className="flex flex-col gap-6">
+                    <div>
+                      <h3 className="text-xl font-bold text-foreground">Send WhatsApp Messages</h3>
+                      <p className="mt-2 text-sm text-muted-foreground">Click Send WhatsApp, compose your message, then mark as done.</p>
+                    </div>
+                    <div className="grid gap-3">
+                      {sendNowRows.length === 0 ? (
+                        <div className="rounded-2xl border border-border/40 bg-slate-50 p-6 text-center">
+                          <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-green-600" />
+                          <p className="text-sm font-semibold text-foreground">All caught up!</p>
+                          <p className="mt-1 text-xs text-muted-foreground">No messages to send right now.</p>
                         </div>
-                        <div className="flex flex-wrap gap-2">
-                          <Button size="sm" className="btn-gradient" onClick={() => handleSendClick(row)}>
-                            Send WhatsApp
-                          </Button>
-                          <Button size="sm" variant="outline" onClick={() => handleMarkDoneClick(row)}>
-                            Mark as done
-                          </Button>
-                          <Button size="sm" variant="outline" onClick={() => openEditDetails(row)}>
-                            Edit details
-                          </Button>
-                          <Dialog>
-                            <DialogTrigger asChild>
-                              <Button size="sm" variant="outline">View details</Button>
-                            </DialogTrigger>
-                            <DialogContent className="max-w-lg">
-                              <DialogHeader>
-                                <DialogTitle>WhatsApp details</DialogTitle>
-                                <DialogDescription>Copy the details you need.</DialogDescription>
-                              </DialogHeader>
-                              <div className="grid gap-4 text-sm">
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <div className="text-xs text-muted-foreground">Patient</div>
-                                    <div className="font-semibold text-foreground break-words">{row.patientName}</div>
-                                  </div>
-                                  <Button size="sm" variant="ghost" onClick={() => copyText(row.patientName)}>
-                                    Copy
-                                  </Button>
+                      ) : (
+                        sendNowRows.map((row, index) => (
+                          <div
+                            key={row.id}
+                            className={`${rowCard} flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between`}
+                            style={rowDelayStyle(index)}
+                          >
+                            <div className="flex-1">
+                              <div className="flex items-center gap-3">
+                                <div className="w-44 truncate text-base font-semibold text-foreground" title={displayPatientName(row.patientName)}>
+                                  {displayPatientName(row.patientName)}
                                 </div>
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <div className="text-xs text-muted-foreground">Phone</div>
-                                    <div className="font-semibold text-foreground break-words">
-                                      {row.phoneE164 || "Unknown"}
-                                    </div>
-                                  </div>
-                                  <Button size="sm" variant="ghost" onClick={() => copyText(row.phoneE164)}>
-                                    Copy
-                                  </Button>
-                                </div>
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <div className="text-xs text-muted-foreground">Message</div>
-                                    <div className="text-foreground break-words whitespace-pre-wrap">
-                                      {row.messageText || "Missing"}
-                                    </div>
-                                  </div>
-                                  <Button size="sm" variant="ghost" onClick={() => copyText(row.messageText)}>
-                                    Copy
-                                  </Button>
-                                </div>
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <div className="text-xs text-muted-foreground">WhatsApp link</div>
-                                    <div className="text-foreground break-all">{row.waLink || "Missing"}</div>
-                                  </div>
-                                  <Button size="sm" variant="ghost" onClick={() => copyText(row.waLink)}>
-                                    Copy
-                                  </Button>
-                                </div>
+                                {row.service ? (
+                                  <Badge variant="outline" className="shrink-0 rounded-full text-xs">
+                                    {row.service}
+                                  </Badge>
+                                ) : null}
+                                <Badge variant="secondary" className="shrink-0 rounded-full text-xs">
+                                  {messageTypeLabel(row.messageType)}
+                                </Badge>
                               </div>
-                            </DialogContent>
-                          </Dialog>
-                        </div>
-                      </div>
-                    ))}
+                              <div className="mt-2 text-sm text-muted-foreground">
+                                <span className="font-semibold text-foreground">{displayDentistName(row.dentist)}</span> - {new Date(row.startIso || row.createdAt).toLocaleString()}
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button size="sm" className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white" onClick={() => handleSendClick(row)}>
+                                <Send size={16} className="mr-1" />
+                                Send
+                              </Button>
+                              <Button size="sm" variant="outline" className="rounded-xl border-border/40" onClick={() => handleMarkDoneClick(row)}>
+                                <CheckCircle2 size={16} className="mr-1" />
+                                Mark done
+                              </Button>
+                              <Dialog>
+                                <DialogTrigger asChild>
+                                  <Button size="sm" variant="outline" className="rounded-xl border-border/40">
+                                    <MoreVertical size={16} />
+                                  </Button>
+                                </DialogTrigger>
+                                <DialogContent className="max-w-lg">
+                                  <DialogHeader>
+                                    <DialogTitle>Message Details</DialogTitle>
+                                    <DialogDescription>Copy what you need for WhatsApp.</DialogDescription>
+                                  </DialogHeader>
+                                  <div className="grid gap-4 text-sm">
+                                    <div className="flex items-start justify-between gap-3 rounded-xl border border-border/40 p-3">
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-semibold text-muted-foreground">PATIENT</div>
+                                        <div className="mt-1 font-semibold text-foreground break-words">
+                                          {displayPatientName(row.patientName)}
+                                        </div>
+                                      </div>
+                                      <Button size="sm" variant="ghost" className="mt-4 flex-shrink-0" onClick={() => copyText(row.patientName)}>
+                                        Copy
+                                      </Button>
+                                    </div>
+                                    <div className="flex items-start justify-between gap-3 rounded-xl border border-border/40 p-3">
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-semibold text-muted-foreground">PHONE</div>
+                                        <div className="mt-1 font-semibold text-foreground break-words">
+                                          {row.phoneE164 || "Unknown"}
+                                        </div>
+                                      </div>
+                                      <Button size="sm" variant="ghost" className="mt-4 flex-shrink-0" onClick={() => copyText(row.phoneE164)}>
+                                        Copy
+                                      </Button>
+                                    </div>
+                                    <div className="flex items-start justify-between gap-3 rounded-xl border border-border/40 p-3">
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-semibold text-muted-foreground">MESSAGE</div>
+                                        <div className="mt-1 text-foreground break-words whitespace-pre-wrap text-xs">
+                                          {row.messageText || "Missing"}
+                                        </div>
+                                      </div>
+                                      <Button size="sm" variant="ghost" className="mt-4 flex-shrink-0" onClick={() => copyText(row.messageText)}>
+                                        Copy
+                                      </Button>
+                                    </div>
+                                  </div>
+                                </DialogContent>
+                              </Dialog>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
                   </div>
                 </Card>
               </TabsContent>
 
               <TabsContent value="review" className="animate-in fade-in slide-in-from-bottom-2 duration-300">
-                <Card className={`${cardBase} p-6`}>
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-semibold text-foreground">Needs review</h3>
+                <Card className={`${cardBase} p-8`}>
+                  <div>
+                    <h3 className="text-xl font-bold text-foreground">Messages Needing Review</h3>
+                    <p className="mt-2 text-sm text-muted-foreground">Fix missing information or resolve issues before sending.</p>
                   </div>
-                  <p className="mt-1 text-sm text-muted-foreground">Resolve missing or duplicated info.</p>
-                  <div className="mt-4 grid gap-3">
-                    {needsReviewRows.map((row) => {
-                      const reason = getReviewReason(row);
-                      return (
-                        <div key={row.id} className={`${rowCard} p-4`}>
-                          <div className="flex items-center justify-between">
-                            <div className="text-base font-semibold text-foreground">{row.patientName}</div>
-                            <Badge variant="outline">{reason}</Badge>
-                          </div>
-                          <div className="mt-1 text-sm text-muted-foreground">
-                            {row.dentist} - {new Date(row.startIso || row.createdAt).toLocaleString()}
-                          </div>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {reason === "Missing phone" ? (
-                              <>
-                                <Button size="sm">Add phone</Button>
-                                <Button size="sm" variant="outline">
-                                  Mark cannot message
+                  <div className="mt-6 grid gap-3">
+                    {needsReviewRows.length === 0 ? (
+                      <div className="rounded-2xl border border-border/40 bg-slate-50 p-6 text-center">
+                        <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-green-600" />
+                        <p className="text-sm font-semibold text-foreground">Everything looks good!</p>
+                        <p className="mt-1 text-xs text-muted-foreground">No messages need review at the moment.</p>
+                      </div>
+                    ) : (
+                      needsReviewRows.map((row, index) => {
+                        const reason = getReviewReason(row);
+                        return (
+                          <div key={row.id} className={`${rowCard} p-5`} style={rowDelayStyle(index)}>
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="flex-1">
+                                <div className="flex flex-wrap items-center gap-3">
+                                  <div className="text-base font-semibold text-foreground">
+                                    {displayPatientName(row.patientName)}
+                                  </div>
+                                  {row.service ? (
+                                    <Badge variant="outline" className="rounded-full text-xs">
+                                      {row.service}
+                                    </Badge>
+                                  ) : null}
+                                  <Badge variant="destructive" className="rounded-full text-xs">{reason}</Badge>
+                                </div>
+                                <div className="mt-2 text-sm text-muted-foreground">
+                                  <span className="font-semibold text-foreground">{displayDentistName(row.dentist)}</span> - {new Date(row.startIso || row.createdAt).toLocaleString()}
+                                </div>
+                              </div>
+                              <AlertCircle className="mt-1 h-5 w-5 flex-shrink-0 text-red-600" />
+                            </div>
+                            <div className="mt-4 flex flex-wrap gap-2">
+                              {["Missing name", "Missing dentist", "Missing phone", "Missing service"].includes(reason) ? (
+                                <Button size="sm" className="rounded-xl bg-red-600 hover:bg-red-700 text-white" onClick={() => openFixDetails(row)}>
+                                  Edit details
                                 </Button>
-                              </>
-                            ) : null}
-                            {reason === "Duplicate" ? (
-                              <>
-                                <Button size="sm">Approve send</Button>
-                                <Button size="sm" variant="outline">
-                                  Dismiss
-                                </Button>
-                              </>
-                            ) : null}
-                            {reason === "Missing details" || reason === "Needs review" ? (
-                              <>
-                                <Button size="sm">Open appointment</Button>
-                                <Button size="sm" variant="outline">
-                                  Resolve
-                                </Button>
-                              </>
-                            ) : null}
+                              ) : null}
+                              {reason === "Duplicate" ? (
+                                <>
+                                  <Button size="sm" className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white">Approve</Button>
+                                  <Button size="sm" variant="outline" className="rounded-xl border-border/40">
+                                    Dismiss
+                                  </Button>
+                                </>
+                              ) : null}
+                              {reason === "Missing details" || reason === "Needs review" ? (
+                                <>
+                                  <Button size="sm" className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white">Check appt</Button>
+                                  <Button size="sm" variant="outline" className="rounded-xl border-border/40">
+                                    Resolve
+                                  </Button>
+                                </>
+                              ) : null}
+                            </div>
                           </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })
+                    )}
                   </div>
                 </Card>
               </TabsContent>
@@ -991,93 +1210,149 @@ const SkeletonDashboard = () => {
               <TabsContent value="followups" className="animate-in fade-in slide-in-from-bottom-2 duration-300">
                 <Tabs value={followupTab} onValueChange={setFollowupTab} className="w-full">
                   <TabsList className={tabListBase}>
-                    <TabsTrigger value="cancelled">
+                    <TabsTrigger value="cancelled" className={`${tabTriggerBase} data-[state=active]:bg-orange-600`}>
                       Cancelled {countBubble(cancelledOpen.length)}
                     </TabsTrigger>
-                    <TabsTrigger value="reschedule">
+                    <TabsTrigger value="reschedule" className={`${tabTriggerBase} data-[state=active]:bg-blue-600`}>
                       Reschedule {countBubble(rescheduleOpen.length)}
                     </TabsTrigger>
-                    <TabsTrigger value="no-next">
-                      No next appointment {countBubble(noNextOpen.length)}
+                    <TabsTrigger value="recall" className={`${tabTriggerBase} data-[state=active]:bg-purple-600`}>
+                      Recall {countBubble(recallOpen.length)}
                     </TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="cancelled">
-                    <Card className={`${cardBase} p-6`}>
-                      <h3 className="text-lg font-semibold text-foreground">Cancelled follow-ups</h3>
-                      <div className="mt-4 grid gap-3">
-                        {cancelledOpen.map((row) => (
-                          <div key={row.id} className={`${rowCard} p-4`}>
-                            <div className="flex items-center justify-between">
-                              <div className="text-base font-semibold text-foreground">{row.patientName}</div>
-                              <Badge variant="secondary">Cancelled</Badge>
-                            </div>
-                            <div className="mt-1 text-sm text-muted-foreground">
-                              {row.dentist} - {new Date(row.startIso).toLocaleString()}
-                            </div>
-                            <div className="mt-1 text-xs text-muted-foreground">AI summary: {row.aiSummary}</div>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              <Button size="sm">Call</Button>
-                              <Button size="sm" variant="outline">
-                                WhatsApp
-                              </Button>
-                            </div>
+                    <Card className={`${cardBase} p-8`}>
+                      <div>
+                        <h3 className="text-xl font-bold text-foreground">Cancelled Appointments</h3>
+                        <p className="mt-2 text-sm text-muted-foreground">Follow up with patients who cancelled their appointments.</p>
+                      </div>
+                      <div className="mt-6 grid gap-3">
+                        {cancelledOpen.length === 0 ? (
+                          <div className="rounded-2xl border border-border/40 bg-slate-50 p-6 text-center">
+                            <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-green-600" />
+                            <p className="text-sm font-semibold text-foreground">All clear</p>
+                            <p className="mt-1 text-xs text-muted-foreground">No cancelled appointments to follow up.</p>
                           </div>
-                        ))}
+                        ) : (
+                          cancelledOpen.map((row, index) => (
+                            <div key={row.id} className={`${rowCard} p-5`} style={rowDelayStyle(index)}>
+                              <div className="flex items-start justify-between gap-4">
+                                <div className="flex-1">
+                                  <div className="flex flex-wrap items-center gap-3">
+                                    <div className="text-base font-semibold text-foreground">{row.patientName}</div>
+                                    <Badge variant="outline" className="rounded-full text-xs">Cancelled</Badge>
+                                  </div>
+                                  <div className="mt-2 text-sm text-muted-foreground">
+                                    <span className="font-semibold text-foreground">{displayDentistName(row.dentist)}</span> - {new Date(row.startIso).toLocaleString()}
+                                  </div>
+                                  <div className="mt-2 text-xs text-muted-foreground">Reason: {row.cancelReason || "Not specified"}</div>
+                                  {row.aiSummary && <div className="mt-1 text-xs text-muted-foreground italic">Note: {row.aiSummary}</div>}
+                                </div>
+                                <Phone className="mt-1 h-5 w-5 flex-shrink-0 text-orange-600" />
+                              </div>
+                              <div className="mt-4 flex flex-wrap gap-2">
+                                <Button size="sm" className="rounded-xl bg-orange-600 hover:bg-orange-700 text-white" onClick={() => openContactDialog(row)}>
+                                  <MessageSquare size={16} className="mr-1" />
+                                  Contact
+                                </Button>
+                                <Button size="sm" variant="outline" className="rounded-xl border-border/40" onClick={() => handleCancelledDone(row)}>
+                                  Done
+                                </Button>
+                              </div>
+                            </div>
+                          ))
+                        )}
                       </div>
                     </Card>
                   </TabsContent>
 
                   <TabsContent value="reschedule">
-                    <Card className={`${cardBase} p-6`}>
-                      <h3 className="text-lg font-semibold text-foreground">Reschedule follow-ups</h3>
-                      <div className="mt-4 grid gap-3">
-                        {rescheduleOpen.map((row) => (
-                          <div key={row.id} className={`${rowCard} p-4`}>
-                            <div className="flex items-center justify-between">
-                              <div className="text-base font-semibold text-foreground">{row.patientName}</div>
-                              <Badge variant="secondary">Reschedule</Badge>
-                            </div>
-                            <div className="mt-1 text-sm text-muted-foreground">
-                              {row.dentist} - {new Date(row.currentStartIso).toLocaleString()}
-                            </div>
-                            <div className="mt-1 text-xs text-muted-foreground">AI summary: {row.aiSummary}</div>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              <Button size="sm">Call</Button>
-                              <Button size="sm" variant="outline">
-                                WhatsApp
-                              </Button>
-                            </div>
+                    <Card className={`${cardBase} p-8`}>
+                      <div>
+                        <h3 className="text-xl font-bold text-foreground">Reschedule Requests</h3>
+                        <p className="mt-2 text-sm text-muted-foreground">Help patients reschedule their appointments.</p>
+                      </div>
+                      <div className="mt-6 grid gap-3">
+                        {rescheduleOpen.length === 0 ? (
+                          <div className="rounded-2xl border border-border/40 bg-slate-50 p-6 text-center">
+                            <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-green-600" />
+                            <p className="text-sm font-semibold text-foreground">All scheduled</p>
+                            <p className="mt-1 text-xs text-muted-foreground">No reschedule requests pending.</p>
                           </div>
-                        ))}
+                        ) : (
+                          rescheduleOpen.map((row, index) => (
+                            <div key={row.id} className={`${rowCard} p-5`} style={rowDelayStyle(index)}>
+                              <div className="flex items-start justify-between gap-4">
+                                <div className="flex-1">
+                                  <div className="flex flex-wrap items-center gap-3">
+                                    <div className="text-base font-semibold text-foreground">{row.patientName}</div>
+                                    <Badge variant="outline" className="rounded-full text-xs">Reschedule</Badge>
+                                  </div>
+                                  <div className="mt-2 text-sm text-muted-foreground">
+                                    <span className="font-semibold text-foreground">{displayDentistName(row.dentist)}</span> - {new Date(row.currentStartIso).toLocaleString()}
+                                  </div>
+                                  {row.aiSummary && <div className="mt-2 text-xs text-muted-foreground italic">Note: {row.aiSummary}</div>}
+                                </div>
+                                <Phone className="mt-1 h-5 w-5 flex-shrink-0 text-blue-600" />
+                              </div>
+                              <div className="mt-4 flex flex-wrap gap-2">
+                                <Button size="sm" className="rounded-xl bg-blue-600 hover:bg-blue-700 text-white" onClick={() => openRescheduleContactDialog(row)}>
+                                  <MessageSquare size={16} className="mr-1" />
+                                  Contact
+                                </Button>
+                                <Button size="sm" variant="outline" className="rounded-xl border-border/40" onClick={() => handleRescheduleDone(row)}>
+                                  Done
+                                </Button>
+                              </div>
+                            </div>
+                          ))
+                        )}
                       </div>
                     </Card>
                   </TabsContent>
 
-                  <TabsContent value="no-next">
-                    <Card className={`${cardBase} p-6`}>
-                      <h3 className="text-lg font-semibold text-foreground">No next appointment</h3>
-                      <div className="mt-4 grid gap-3">
-                        {noNextOpen.map((row) => (
-                          <div key={row.id} className={`${rowCard} p-4`}>
-                            <div className="flex items-center justify-between">
-                              <div className="text-base font-semibold text-foreground">{row.patientName}</div>
-                              <Badge variant="outline">{row.status === "pending" ? "Pending" : "Nudged"}</Badge>
-                            </div>
-                            <div className="mt-1 text-sm text-muted-foreground">
-                              {row.dentist} - Last visit {new Date(row.lastVisitIso).toLocaleDateString()}
-                            </div>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              <Button size="sm">Send follow-up</Button>
-                              <Button size="sm" variant="outline">
-                                Mark booked
-                              </Button>
-                              <Button size="sm" variant="ghost">
-                                Snooze 7 days
-                              </Button>
-                            </div>
+                  <TabsContent value="recall">
+                    <Card className={`${cardBase} p-8`}>
+                      <div>
+                        <h3 className="text-xl font-bold text-foreground">Patient Recall</h3>
+                        <p className="mt-2 text-sm text-muted-foreground">Invite patients back for their routine checkups.</p>
+                      </div>
+                      <div className="mt-6 grid gap-3">
+                        {recallOpen.length === 0 ? (
+                          <div className="rounded-2xl border border-border/40 bg-slate-50 p-6 text-center">
+                            <CheckCircle2 className="mx-auto mb-3 h-10 w-10 text-green-600" />
+                            <p className="text-sm font-semibold text-foreground">All reminded</p>
+                            <p className="mt-1 text-xs text-muted-foreground">No recalls pending at this time.</p>
                           </div>
-                        ))}
+                        ) : (
+                          recallOpen.map((row, index) => (
+                            <div key={row.id} className={`${rowCard} p-5`} style={rowDelayStyle(index)}>
+                              <div className="flex items-start justify-between gap-4">
+                                <div className="flex-1">
+                                  <div className="flex flex-wrap items-center gap-3">
+                                    <div className="text-base font-semibold text-foreground">{row.patientName}</div>
+                                    <Badge variant="outline" className="rounded-full text-xs">Recall</Badge>
+                                  </div>
+                                  <div className="mt-2 text-sm text-muted-foreground">
+                                    <span className="font-semibold text-foreground">{row.dentist}</span> • Last visit {row.lastVisitIso ? new Date(row.lastVisitIso).toLocaleDateString() : "Unknown"}
+                                  </div>
+                                  <div className="mt-2 text-xs text-muted-foreground">{row.phoneE164 || "No phone on file"}</div>
+                                </div>
+                                <Phone className="mt-1 h-5 w-5 flex-shrink-0 text-purple-600" />
+                              </div>
+                              <div className="mt-4 flex flex-wrap gap-2">
+                                <Button size="sm" className="rounded-xl bg-purple-600 hover:bg-purple-700 text-white" onClick={() => openRecallContactDialog(row)}>
+                                  <MessageSquare size={16} className="mr-1" />
+                                  Contact
+                                </Button>
+                                <Button size="sm" variant="outline" className="rounded-xl border-border/40" onClick={() => handleRecallNotNeeded(row)}>
+                                  Not needed
+                                </Button>
+                              </div>
+                            </div>
+                          ))
+                        )}
                       </div>
                     </Card>
                   </TabsContent>
@@ -1085,23 +1360,40 @@ const SkeletonDashboard = () => {
               </TabsContent>
 
               <TabsContent value="completed" className="animate-in fade-in slide-in-from-bottom-2 duration-300">
-                <Card className={`${cardBase} p-6`}>
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-semibold text-foreground">Completed today</h3>
+                <Card className={`${cardBase} p-8`}>
+                  <div>
+                    <h3 className="text-xl font-bold text-foreground">Today's Activity</h3>
+                    <p className="mt-2 text-sm text-muted-foreground">Messages sent and appointments handled.</p>
                   </div>
-                  <p className="mt-1 text-sm text-muted-foreground">Proof of work for today.</p>
-                  <div className="mt-4 grid gap-3">
+                  <div className="mt-6 grid gap-3">
                     {completedTodayRows.length === 0 ? (
-                      <div className="text-sm text-muted-foreground">No completed messages yet.</div>
+                      <div className="rounded-2xl border border-border/40 bg-slate-50 p-6 text-center">
+                        <Clock className="mx-auto mb-3 h-10 w-10 text-muted-foreground" />
+                        <p className="text-sm font-semibold text-foreground">Nothing sent yet</p>
+                        <p className="mt-1 text-xs text-muted-foreground">Start sending messages to see your activity here.</p>
+                      </div>
                     ) : (
-                      completedTodayRows.map((row) => (
-                        <div key={row.id} className={`${rowCard} p-4`}>
-                          <div className="flex items-center justify-between">
-                            <div className="text-base font-semibold text-foreground">{row.patientName}</div>
-                            <Badge variant="secondary">Sent</Badge>
-                          </div>
-                          <div className="mt-1 text-sm text-muted-foreground">
-                            {row.dentist} - {new Date(row.startIso || row.createdAt).toLocaleString()}
+                      completedTodayRows.map((row, index) => (
+                        <div key={row.id} className={`${rowCard} p-5`} style={rowDelayStyle(index)}>
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1">
+                              <div className="flex flex-wrap items-center gap-3">
+                                <div className="text-base font-semibold text-foreground">
+                                  {displayPatientName(row.patientName)}
+                                </div>
+                                {row.service ? (
+                                  <Badge variant="outline" className="rounded-full text-xs">
+                                    {row.service}
+                                  </Badge>
+                                ) : null}
+                                <Badge variant="secondary" className="rounded-full text-xs bg-green-100 text-green-700 border-green-200">✓ Sent</Badge>
+                              </div>
+                              <div className="mt-2 text-sm text-muted-foreground">
+                                <span className="font-semibold text-foreground">{displayDentistName(row.dentist)}</span> - {new Date(row.startIso || row.createdAt).toLocaleString()}
+                              </div>
+                              {row.sentAt && <div className="mt-1 text-xs text-muted-foreground">Sent at {new Date(row.sentAt).toLocaleTimeString()}</div>}
+                            </div>
+                            <CheckCircle2 className="mt-1 h-5 w-5 flex-shrink-0 text-green-600" />
                           </div>
                         </div>
                       ))
@@ -1112,37 +1404,55 @@ const SkeletonDashboard = () => {
 
               {showWeekTab ? (
                 <TabsContent value="week" className="animate-in fade-in slide-in-from-bottom-2 duration-300">
-                  <Card className={`${cardBase} p-6`}>
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-lg font-semibold text-foreground">This week</h3>
+                  <Card className={`${cardBase} p-8`}>
+                    <div>
+                      <h3 className="text-xl font-bold text-foreground">This Week</h3>
+                      <p className="mt-2 text-sm text-muted-foreground">Last 7 days including today.</p>
                     </div>
-                    <p className="mt-1 text-sm text-muted-foreground">Last 7 days including today.</p>
-                    <div className="mt-4 grid gap-4 md:grid-cols-2">
-                      <div className={`${rowCard} p-4`}>
-                        <div className="text-sm text-muted-foreground">Closed follow-ups</div>
-                        <div className="mt-2 text-2xl font-semibold text-foreground">{weeklyClosed}</div>
+                    <div className="mt-6 grid gap-4 md:grid-cols-2">
+                      <div className={`${rowCard} p-6`}>
+                        <div className="text-sm font-semibold text-muted-foreground">Closed</div>
+                        <div className="mt-3 flex items-baseline gap-2">
+                          <div className="text-3xl font-bold text-green-600">{weeklyClosed}</div>
+                          <div className="text-xs text-muted-foreground">of {weeklyTotal}</div>
+                        </div>
                       </div>
-                      <div className={`${rowCard} p-4`}>
-                        <div className="text-sm text-muted-foreground">Open follow-ups</div>
-                        <div className="mt-2 text-2xl font-semibold text-foreground">
-                          {Math.max(weeklyTotal - weeklyClosed, 0)}
+                      <div className={`${rowCard} p-6`}>
+                        <div className="text-sm font-semibold text-muted-foreground">Pending</div>
+                        <div className="mt-3 flex items-baseline gap-2">
+                          <div className="text-3xl font-bold text-orange-600">{Math.max(weeklyTotal - weeklyClosed, 0)}</div>
+                          <div className="text-xs text-muted-foreground">of {weeklyTotal}</div>
                         </div>
                       </div>
                     </div>
-                    <div className="mt-4 grid gap-3">
+                    <div className="mt-6 grid gap-3">
                       {weeklyWindow.length === 0 ? (
-                        <div className="text-sm text-muted-foreground">No follow-ups logged this week.</div>
+                        <div className="rounded-2xl border border-border/40 bg-slate-50 p-6 text-center">
+                          <Clock className="mx-auto mb-3 h-10 w-10 text-muted-foreground" />
+                          <p className="text-sm font-semibold text-foreground">No activity</p>
+                          <p className="mt-1 text-xs text-muted-foreground">No follow-ups logged this week.</p>
+                        </div>
                       ) : (
-                        weeklyWindow.map((row) => (
-                          <div key={row.id} className={`${rowCard} p-4`}>
-                            <div className="flex items-center justify-between">
-                              <div className="text-base font-semibold text-foreground">{row.patientName}</div>
-                              <Badge variant={row.status === "closed" ? "secondary" : "outline"}>
-                                {row.status === "closed" ? "Closed" : "Open"}
-                              </Badge>
-                            </div>
-                            <div className="mt-1 text-sm text-muted-foreground">
-                              {row.dentist} - {row.detail} - {new Date(row.date).toLocaleDateString()}
+                        weeklyWindow.map((row, index) => (
+                          <div key={row.id} className={`${rowCard} p-5`} style={rowDelayStyle(index)}>
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="flex-1">
+                                <div className="flex flex-wrap items-center gap-3">
+                                  <div className="text-base font-semibold text-foreground">{row.patientName}</div>
+                                  <Badge variant={row.status === "closed" ? "secondary" : "outline"} className="rounded-full text-xs">
+                                    {row.status === "closed" ? "✓ Closed" : "Pending"}
+                                  </Badge>
+                                </div>
+                                <div className="mt-2 text-sm text-muted-foreground">
+                                  <span className="font-semibold text-foreground">{row.dentist}</span> • {row.detail}
+                                </div>
+                                <div className="mt-1 text-xs text-muted-foreground">{new Date(row.date).toLocaleDateString()}</div>
+                              </div>
+                              {row.status === "closed" ? (
+                                <CheckCircle2 className="mt-1 h-5 w-5 flex-shrink-0 text-green-600" />
+                              ) : (
+                                <Clock className="mt-1 h-5 w-5 flex-shrink-0 text-orange-600" />
+                              )}
                             </div>
                           </div>
                         ))
@@ -1152,107 +1462,92 @@ const SkeletonDashboard = () => {
                 </TabsContent>
               ) : null}
 
-              <TabsContent value="patients" className="animate-in fade-in slide-in-from-bottom-2 duration-300">
-                <Card className={`${cardBase} p-6`}>
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-semibold text-foreground">All patients</h3>
-                  </div>
-                  <p className="mt-1 text-sm text-muted-foreground">Lookup by latest activity.</p>
-                  <div className="mt-4 grid gap-3">
-                    {allPatients.map((row) => (
-                      <div
-                        key={row.name}
-                        className={`${rowCard} flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between`}
-                      >
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="text-base font-semibold text-foreground">{row.name}</div>
-                            <Badge variant="outline">{row.status}</Badge>
-                          </div>
-                          <div className="mt-1 text-sm text-muted-foreground">
-                            Last activity - {new Date(row.lastActivity).toLocaleDateString()}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              </TabsContent>
             </Tabs>
           </div>
         </main>
       </div>
 
       <Dialog
-        open={editOpen}
+        open={fixOpen}
         onOpenChange={(open) => {
+          setFixOpen(open);
           if (!open) {
-            setEditOpen(false);
-            setEditRow(null);
-            setEditError(null);
-            return;
+            setFixRow(null);
+            setFixError(null);
           }
-          setEditOpen(true);
         }}
       >
-        <DialogContent className="max-w-xl">
+        <DialogContent className="max-w-md rounded-2xl">
           <DialogHeader>
-            <DialogTitle>Edit details</DialogTitle>
-            <DialogDescription>Changes are saved back to Google Sheets.</DialogDescription>
+            <DialogTitle className="text-lg font-bold">Fix Appointment Details</DialogTitle>
+            <DialogDescription>
+              Correct any missing information. Updates will sync to Google Calendar.
+            </DialogDescription>
           </DialogHeader>
+
           <div className="grid gap-4">
             <div className="grid gap-2">
-              <Label htmlFor="edit-patient">Patient name</Label>
-              <Input
-                id="edit-patient"
-                value={editForm.patientName}
-                onChange={(e) => handleEditChange("patientName", e.target.value)}
+              <label className="text-sm font-semibold text-foreground">Patient Name</label>
+              <input
+                className="rounded-xl border border-border/40 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-500 transition-colors hover:border-border/60 focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                value={fixPatientName}
+                onChange={(e) => setFixPatientName(e.target.value)}
+                placeholder="Enter patient name"
               />
             </div>
+
             <div className="grid gap-2">
-              <Label htmlFor="edit-phone">Phone</Label>
-              <Input
-                id="edit-phone"
-                type="tel"
-                value={editForm.phoneE164}
-                onChange={(e) => handleEditChange("phoneE164", e.target.value)}
+              <label className="text-sm font-semibold text-foreground">Phone Number</label>
+              <input
+                className="rounded-xl border border-border/40 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-500 transition-colors hover:border-border/60 focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                value={fixPhone}
+                onChange={(e) => setFixPhone(e.target.value)}
+                placeholder="e.g., +971501234567"
               />
             </div>
+
             <div className="grid gap-2">
-              <Label htmlFor="edit-message">Message</Label>
-              <Textarea
-                id="edit-message"
-                rows={4}
-                value={editForm.messageText}
-                onChange={(e) => handleEditChange("messageText", e.target.value)}
+              <label className="text-sm font-semibold text-foreground">Dentist Name</label>
+              <input
+                className="rounded-xl border border-border/40 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-500 transition-colors hover:border-border/60 focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                value={fixDentist}
+                onChange={(e) => setFixDentist(e.target.value)}
+                placeholder="e.g., Dr. Smith"
               />
             </div>
+
             <div className="grid gap-2">
-              <Label htmlFor="edit-link">WhatsApp link</Label>
-              <Textarea
-                id="edit-link"
-                rows={3}
-                value={editForm.waLink}
-                onChange={(e) => handleEditChange("waLink", e.target.value)}
+              <label className="text-sm font-semibold text-foreground">Service</label>
+              <input
+                className="rounded-xl border border-border/40 bg-white px-4 py-2.5 text-sm text-slate-900 placeholder:text-slate-500 transition-colors hover:border-border/60 focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                value={fixService}
+                onChange={(e) => setFixService(e.target.value)}
+                placeholder="e.g., Cleaning"
               />
             </div>
-          </div>
-          {editError ? <div className="text-sm text-destructive">{editError}</div> : null}
-          <div className="flex flex-wrap justify-end gap-2">
-            <Button
-              variant="outline"
-              onClick={() => {
-                setEditOpen(false);
-                setEditRow(null);
-                setEditError(null);
-              }}
-              disabled={editSaving}
-            >
-              Cancel
-            </Button>
-            <Button className="btn-gradient" onClick={saveEditDetails} disabled={editSaving}>
-              {editSaving ? "Saving..." : "Save changes"}
-            </Button>
+
+            {fixError ? (
+              <div className="rounded-xl border border-red-200/50 bg-red-50 p-3 text-sm text-red-700">
+                <span className="font-semibold">Error: </span>{fixError}
+              </div>
+            ) : null}
+
+            <div className="flex gap-3 pt-2">
+              <Button 
+                className="rounded-xl flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold" 
+                disabled={fixSaving} 
+                onClick={submitFixDetails}
+              >
+                {fixSaving ? "Saving..." : "Save changes"}
+              </Button>
+              <Button 
+                variant="outline" 
+                className="rounded-xl flex-1 border-border/40" 
+                onClick={() => setFixOpen(false)}
+              >
+                Cancel
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
@@ -1260,29 +1555,219 @@ const SkeletonDashboard = () => {
       <Dialog
         open={confirmOpen}
         onOpenChange={(open) => {
-          if (!open && activeRowId) {
-            handleConfirmNotSent();
-            return;
-          }
           setConfirmOpen(open);
+          if (!open) setActiveRowId(null);
         }}
       >
-        <DialogContent>
+        <DialogContent className="max-w-md rounded-2xl">
           <DialogHeader>
-            <DialogTitle>
-              {confirmMode === "done" ? "Are you sure you've sent it?" : "Did you send the message?"}
+            <DialogTitle className="text-lg font-bold">
+              {confirmMode === "done" ? "Message Sent?" : "Confirm Send"}
             </DialogTitle>
             <DialogDescription>
-              If not, keep it in Send now and send it when ready.
+              {confirmMode === "done" 
+                ? "Did you successfully send this message via WhatsApp?"
+                : "Have you sent the message via WhatsApp?"}
             </DialogDescription>
           </DialogHeader>
-          <div className="flex flex-wrap gap-3">
-            <Button className="btn-gradient" onClick={handleConfirmSent}>
+          <div className="flex flex-col gap-3 pt-2">
+            <Button 
+              className="rounded-xl w-full bg-green-600 hover:bg-green-700 text-white font-semibold"
+              onClick={handleConfirmSent}
+            >
+              <CheckCircle2 size={16} className="mr-2" />
               Yes, sent
             </Button>
-            <Button variant="outline" onClick={handleConfirmNotSent}>
+            <Button 
+              variant="outline" 
+              className="rounded-xl w-full border-border/40"
+              onClick={handleConfirmNotSent}
+            >
               Not yet
             </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={contactOpen}
+        onOpenChange={(open) => {
+          setContactOpen(open);
+          if (!open) setContactRow(null);
+        }}
+      >
+        <DialogContent className="max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-lg font-bold">Contact Patient</DialogTitle>
+            <DialogDescription>Use the information below to reach out.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 text-sm">
+            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-muted-foreground">PATIENT NAME</div>
+              <div className="mt-2 font-semibold text-foreground">
+                {contactRow?.patientName ?? "Unknown"}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-muted-foreground">PHONE</div>
+              <div className="mt-2 font-mono font-semibold text-foreground break-all">
+                {contactRow?.phoneE164 || "Unknown"}
+              </div>
+            </div>
+            <div className="flex gap-2 pt-2">
+              <Button
+                className="rounded-xl flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold"
+                onClick={() => copyText(contactRow?.phoneE164)}
+                disabled={!contactRow?.phoneE164}
+              >
+                <Phone size={16} className="mr-2" />
+                Copy
+              </Button>
+              <Button 
+                variant="outline" 
+                className="rounded-xl flex-1 border-border/40"
+                onClick={() => setContactOpen(false)}
+              >
+                Close
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={rescheduleContactOpen}
+        onOpenChange={(open) => {
+          setRescheduleContactOpen(open);
+          if (!open) setRescheduleContactRow(null);
+        }}
+      >
+        <DialogContent className="max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-lg font-bold">Contact Patient</DialogTitle>
+            <DialogDescription>Share these details to help reschedule their appointment.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 text-sm">
+            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-muted-foreground">PATIENT NAME</div>
+              <div className="mt-2 font-semibold text-foreground">
+                {rescheduleContactRow?.patientName ?? "Unknown"}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-muted-foreground">PHONE</div>
+              <div className="mt-2 font-mono font-semibold text-foreground break-all">
+                {rescheduleContactRow?.phoneE164 || "Unknown"}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-muted-foreground">DENTIST</div>
+              <div className="mt-2 font-semibold text-foreground">
+                {rescheduleContactRow?.dentist ?? "Unknown"}
+              </div>
+            </div>
+            {rescheduleContactRow?.aiSummary && (
+              <div className="rounded-xl border border-border/40 bg-blue-50 p-4">
+                <div className="text-xs font-semibold text-muted-foreground">NOTE</div>
+                <div className="mt-2 text-foreground italic">
+                  {rescheduleContactRow.aiSummary}
+                </div>
+              </div>
+            )}
+            <div className="flex gap-2 pt-2">
+              <Button
+                className="rounded-xl flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold"
+                onClick={() => copyText(rescheduleContactRow?.phoneE164)}
+                disabled={!rescheduleContactRow?.phoneE164}
+              >
+                <Phone size={16} className="mr-2" />
+                Copy
+              </Button>
+              <Button 
+                variant="outline" 
+                className="rounded-xl flex-1 border-border/40"
+                onClick={() => setRescheduleContactOpen(false)}
+              >
+                Close
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={recallContactOpen}
+        onOpenChange={(open) => {
+          setRecallContactOpen(open);
+          if (!open) setRecallContactRow(null);
+        }}
+      >
+        <DialogContent className="max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-lg font-bold">Send Recall Message</DialogTitle>
+            <DialogDescription>Use the details below to contact the patient.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 text-sm">
+            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-muted-foreground">PATIENT NAME</div>
+              <div className="mt-2 font-semibold text-foreground">
+                {recallContactRow?.patientName ?? "Unknown"}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-muted-foreground">PHONE</div>
+              <div className="mt-2 font-mono font-semibold text-foreground break-all">
+                {recallContactRow?.phoneE164 || "Unknown"}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-muted-foreground">DENTIST</div>
+              <div className="mt-2 font-semibold text-foreground">
+                {recallContactRow?.dentist ?? "Unknown"}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-muted-foreground">LAST VISIT</div>
+              <div className="mt-2 font-semibold text-foreground">
+                {recallContactRow?.lastVisitIso
+                  ? new Date(recallContactRow.lastVisitIso).toLocaleDateString()
+                  : "Unknown"}
+              </div>
+            </div>
+            {recallContactRow?.copyBlock && (
+              <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                <div className="text-xs font-semibold text-muted-foreground">MESSAGE TEMPLATE</div>
+                <div className="mt-2 whitespace-pre-wrap text-xs text-foreground font-mono">
+                  {recallContactRow.copyBlock}
+                </div>
+              </div>
+            )}
+            <div className="flex flex-col gap-2 pt-2">
+              <Button
+                className="rounded-xl w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold"
+                onClick={() => copyText(recallContactRow?.copyBlock)}
+                disabled={!recallContactRow?.copyBlock}
+              >
+                <MessageSquare size={16} className="mr-2" />
+                Copy message
+              </Button>
+              <Button
+                variant="outline"
+                className="rounded-xl w-full border-border/40"
+                onClick={() => recallContactRow && handleRecallDone(recallContactRow)}
+                disabled={!recallContactRow}
+              >
+                <CheckCircle2 size={16} className="mr-2" />
+                Mark as done
+              </Button>
+              <Button 
+                variant="outline" 
+                className="rounded-xl w-full border-border/40"
+                onClick={() => setRecallContactOpen(false)}
+              >
+                Close
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
@@ -1291,3 +1776,4 @@ const SkeletonDashboard = () => {
 };
 
 export default SkeletonDashboard;
+

@@ -171,6 +171,10 @@
     animation: readyPulse 2.4s ease-in-out infinite;
   }
 
+  .animate-row-enter {
+    animation: slideDownIn 0.45s ease-out both;
+  }
+
   .hover-lift {
     @apply transition-all duration-300 hover:-translate-y-1 hover:shadow-lg;
   }
@@ -250,6 +254,17 @@
   }
 }
 
+@keyframes slideDownIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes pulse-glow {
   0%, 100% {
     box-shadow: 0 0 20px hsla(217, 91%, 60%, 0.4);
@@ -261,4 +276,10 @@
 
 .animate-pulse-glow {
   animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-row-enter {
+    animation: none;
+  }
 }

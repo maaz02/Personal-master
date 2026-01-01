@@ -4,6 +4,7 @@
   | "reminder_tomorrow"
   | "reminder_2h"
   | "book_next_nudge1"
+  | "book_next_nudge2"
   | "book_next_nudge_manual";
 
 export type SendStatus = "ready" | "opened" | "sent" | "needs_review";
