@@ -17,6 +17,9 @@ import {
 import { supabase } from "@/lib/supabaseClient";
 import { FunctionsHttpError } from "@supabase/supabase-js";
 import { Send, CheckCircle2, AlertCircle, Clock, Phone, MessageSquare, Trash2, MoreVertical } from "lucide-react";
+import { calculateMetrics, MetricsData } from "@/lib/metricsCalculator";
+import { DashboardNav } from "@/components/DashboardNav";
+import { Reports } from "@/components/Reports";
 
 type OutboxRow = {
   id: string;
@@ -327,9 +330,13 @@ const SkeletonDashboard = () => {
   const recallInitRef = useRef(false);
 
   const [outboxRows, setOutboxRows] = useState<OutboxRow[]>([]);
+  const [confirmRows, setConfirmRows] = useState<any[]>([]);
   const [cancelledFollowUps, setCancelledFollowUps] = useState<CancelledFollowUp[]>([]);
   const [rescheduleFollowUps, setRescheduleFollowUps] = useState<RescheduleFollowUp[]>([]);
   const [recallRows, setRecallRows] = useState<RecallRow[]>([]);
+  const [metricsData, setMetricsData] = useState<MetricsData | null>(null);
+  const [mainTab, setMainTab] = useState("dashboard");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
   const fetchTab = async (tab: string) => {
@@ -433,10 +440,17 @@ const SkeletonDashboard = () => {
         fetchTab("Recall"), // ⚠️ must match your EXACT sheet tab name
       ]);
 
-      setOutboxRows(outboxRaw.map(mapOutbox));
-      setCancelledFollowUps(cancelledRaw.map(mapCancelled));
-      setRescheduleFollowUps(rescheduleRaw.map(mapReschedule));
-      setRecallRows(recallRaw.map(mapRecall));
+      const mappedOutbox = outboxRaw.map(mapOutbox);
+      const mappedConfirmed = confirmedRaw;
+      const mappedCancelled = cancelledRaw.map(mapCancelled);
+      const mappedReschedule = rescheduleRaw.map(mapReschedule);
+      const mappedRecall = recallRaw.map(mapRecall);
+
+      setOutboxRows(mappedOutbox);
+      setConfirmRows(mappedConfirmed);
+      setCancelledFollowUps(mappedCancelled);
+      setRescheduleFollowUps(mappedReschedule);
+      setRecallRows(mappedRecall);
     } catch (e) {
       console.error("Load sheets error:", e);
     }
@@ -610,6 +624,20 @@ const SkeletonDashboard = () => {
       }
     };
   }, []);
+
+  // Calculate metrics whenever data changes
+  useEffect(() => {
+    const needsReviewCount = needsReviewRows.length;
+    const metrics = calculateMetrics(
+      outboxRows,
+      confirmRows,
+      cancelledFollowUps,
+      rescheduleFollowUps,
+      recallRows,
+      needsReviewCount
+    );
+    setMetricsData(metrics);
+  }, [outboxRows, confirmRows, cancelledFollowUps, rescheduleFollowUps, recallRows, needsReviewRows]);
 
   const followUpOverdue = [...cancelledOpen, ...rescheduleOpen].filter((row) => {
     const updatedAt = toDate(row.updatedAt || row.createdAt);
@@ -983,17 +1011,31 @@ const SkeletonDashboard = () => {
 
   const showWeekTab = timeRange === "7d";
 
+  const handleGenerateReport = () => {
+    // TODO: Implement report generation (PDF/DOCX)
+    console.log("Generating weekly report...");
+  };
+
   return (
-    <div className="app-theme relative min-h-screen overflow-hidden bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-50 text-foreground">
+    <div className="app-theme relative flex min-h-screen overflow-hidden bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-50 text-foreground">
       <div className="pointer-events-none absolute -top-40 right-1/4 h-80 w-80 rounded-full bg-blue-100/40 blur-[100px]" />
       <div className="pointer-events-none absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-cyan-100/30 blur-[100px]" />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_40%_at_50%_0%,rgba(191,219,254,0.15),transparent_50%)]" />
 
-      <div className="relative z-10">
+      {/* Sidebar Navigation */}
+      <DashboardNav
+        activeTab={mainTab}
+        onTabChange={setMainTab}
+        isOpen={sidebarOpen}
+        onOpenChange={setSidebarOpen}
+      />
+
+      <div className="relative z-10 flex-1 flex flex-col overflow-hidden">
+        {/* Header */}
         <div className="relative border-b border-slate-200 bg-white/95 backdrop-blur-sm shadow-[0_2px_8px_rgba(0,0,0,0.04)]">
           <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-blue-200/40 to-transparent" />
           <div className="container mx-auto flex flex-col gap-4 px-4 py-6 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1 md:ml-0 ml-12">
               <div className="text-3xl font-extrabold text-slate-900">
                 Appointment{" "}
                 <span className="bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">
@@ -1002,25 +1044,34 @@ const SkeletonDashboard = () => {
               </div>
               <p className="text-sm font-medium text-slate-600">Manage appointments and follow-ups efficiently</p>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <Select value={timeRange} onValueChange={setTimeRange}>
-                <SelectTrigger className="w-40 border-slate-200 bg-white rounded-xl font-medium">
-                  <SelectValue placeholder="Range" />
-                </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="today">Today</SelectItem>
-                <SelectItem value="7d">Last 7 days</SelectItem>
-                <SelectItem value="30d">Last 30 days</SelectItem>
-              </SelectContent>
-              </Select>
+            {mainTab === "dashboard" && (
+              <div className="flex flex-wrap items-center gap-3">
+                <Select value={timeRange} onValueChange={setTimeRange}>
+                  <SelectTrigger className="w-40 border-slate-200 bg-white rounded-xl font-medium">
+                    <SelectValue placeholder="Range" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="today">Today</SelectItem>
+                    <SelectItem value="7d">Last 7 days</SelectItem>
+                    <SelectItem value="30d">Last 30 days</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button variant="outline" onClick={() => navigate("/auth")} className="rounded-xl border-slate-200 font-medium hover:bg-slate-50 hover:border-slate-300">
+                  Sign out
+                </Button>
+              </div>
+            )}
+            {mainTab === "reports" && (
               <Button variant="outline" onClick={() => navigate("/auth")} className="rounded-xl border-slate-200 font-medium hover:bg-slate-50 hover:border-slate-300">
                 Sign out
               </Button>
-            </div>
+            )}
           </div>
         </div>
 
-        <main className="container mx-auto px-4 py-8 animate-in fade-in duration-500">
+        {/* Main Content */}
+        <main className="flex-1 overflow-y-auto">{mainTab === "dashboard" && (
+          <div className="container mx-auto px-4 py-8 animate-in fade-in duration-500">
           <div className="grid gap-8">
             <div>
               <h2 className="text-2xl font-extrabold text-slate-900">
@@ -1553,6 +1604,12 @@ const SkeletonDashboard = () => {
 
             </Tabs>
           </div>
+        </div>
+        )}
+
+        {mainTab === "reports" && (
+          <Reports metrics={metricsData} onGenerateReport={handleGenerateReport} />
+        )}
         </main>
       </div>
 
