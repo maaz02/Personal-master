@@ -175,8 +175,10 @@ export function calculateMetrics(
   const recoveryRate = cancelledFollowUps.length > 0 ? (cancelledWithRebook / cancelledFollowUps.length) * 100 : 0;
 
   // ============ OPEN FOLLOW-UPS BACKLOG ============
-  const openCancelled = cancelledFollowUps.filter((r) => r.followupStatus === "open").length;
-  const openReschedule = rescheduleFollowUps.filter((r) => r.followupStatus === "open").length;
+  const openCancelledRows = cancelledFollowUps.filter((r) => r.followupStatus === "open");
+  const openRescheduleRows = rescheduleFollowUps.filter((r) => r.followupStatus === "open");
+  const openCancelled = openCancelledRows.length;
+  const openReschedule = openRescheduleRows.length;
   const openRecall = recallRows.filter(
     (r) => r.sendStatus && !["done", "not_needed", "recalled"].includes(r.sendStatus)
   ).length;
@@ -184,7 +186,7 @@ export function calculateMetrics(
 
   // Overdue (> 2 days old)
   const overdueThreshold = 2 * 24 * 60 * 60 * 1000; // 2 days
-  const overdueFollowups = [...openCancelled, ...openReschedule].filter((r) => {
+  const overdueFollowups = [...openCancelledRows, ...openRescheduleRows].filter((r) => {
     try {
       const updated = parseISO(r.updatedAt || r.createdAt);
       return now.getTime() - updated.getTime() > overdueThreshold;
@@ -341,7 +343,7 @@ export function calculateMetrics(
     overdueFollowupsCount,
     recallConversionRate,
     needsReviewRate,
-    cancellationRateTrendMoM,
+    cancellationRateTrendMoM: cancellationTrendMoM,
     timeSlotLeakage,
     dayOfWeekPatterns,
     cancellationReasons,
