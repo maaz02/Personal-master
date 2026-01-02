@@ -266,3 +266,297 @@ System:
 - Created `context.md` with full repo overview and workflow notes.
 - Added `.env` with Supabase URL and publishable key for local dev.
 - Installed npm dependencies (`npm install`).
+
+### 2026-01-02 (Reports & Metrics Implementation)
+
+#### New Files Added
+
+1. **`src/lib/metricsCalculator.ts`** - Metrics calculation engine
+   - Calculates all KPIs based on raw sheet data
+   - Supports 24-hour and monthly metrics windows
+   - Includes Dubai timezone awareness
+   - Main export: `calculateMetrics()` function
+   
+2. **`src/lib/reportGenerator.ts`** - PDF report generation
+   - Uses jsPDF library for PDF creation
+   - Auto-generates weekly reports with insights and recommendations
+   - Includes executive summary, KPI breakdown, trends, and actionable insights
+   - Main export: `generateWeeklyReport()` function
+
+3. **`src/components/Reports.tsx`** - Reports & KPIs UI component
+   - Displays all metrics in a tabbed interface (Overview, Reminders, Follow-ups, Patterns, Data Quality)
+   - Interactive charts using Recharts (pie, bar, line charts)
+   - Stat cards with color-coded performance indicators
+   - Integrated "Generate Weekly Report" button for PDF export
+
+4. **`src/components/DashboardNav.tsx`** - Left sidebar navigation
+   - Responsive sidebar with toggle for mobile
+   - Two main tabs: Dashboard (existing), Reports & KPIs (new)
+   - Consistent design with rest of app
+
+#### Modified Files
+
+1. **`src/pages/SkeletonDashboard.tsx`**
+   - Added `confirmRows` state to store Confirmed sheet data (was being fetched but not stored)
+   - Added `metricsData` state to cache calculated metrics
+   - Added `mainTab` state for top-level navigation (Dashboard vs Reports)
+   - Added `sidebarOpen` state for mobile sidebar toggle
+   - Added useEffect hook to auto-calculate metrics whenever data changes
+   - Refactored main layout to include DashboardNav sidebar
+   - Updated return statement to render either Dashboard content or Reports tab based on `mainTab`
+   - Integrated Reports component with metrics prop
+
+#### New Dependencies
+
+- `date-fns-tz@^2.0.0` - Timezone-aware date operations (Dubai timezone)
+- `jspdf@^2.5.0` - PDF document generation
+- `html2canvas@^1.4.1` - HTML to canvas conversion (for future enhancements)
+
+---
+
+## Metrics Implementation Details
+
+### Calculated KPIs
+
+#### Reminder Coverage (by type)
+- **Formula:** `count(Outbox where messageType = "reminder_48hr|reminder_tomorrow|reminder_2h")`
+- **Why:** Ensures all scheduled reminders are being generated and sent
+- **Calculation:** Simple count of outbox rows filtered by messageType
+- **Status:** ✅ Fully implemented
+
+#### Confirmation Rate (24h)
+- **Formula:** `confirmed(24h) / sent(24h) * 100`
+- **Why:** Key metric for patient engagement and message effectiveness
+- **Calculation:** Count Confirmed rows created in last 24h, divide by Outbox rows with sentAt in last 24h
+- **Status:** ✅ Fully implemented
+
+#### No Response Rate (24h)
+- **Formula:** `(sent - confirmed - cancelled - rescheduled) / sent * 100`
+- **Why:** Identifies patients who received message but took no action
+- **Calculation:** Subtract all response types from sent count
+- **Status:** ✅ Fully implemented
+
+#### Cancellation & Reschedule Rates
+- **Formula:** `cancelledFollowUps.length / totalOutboxSent * 100`
+- **Why:** Track appointment loss and identify issues
+- **Calculation:** Count of all CancelledFollowUp/RescheduleFollowUp rows vs total Outbox sent
+- **Status:** ✅ Fully implemented
+
+#### Follow-up Completion Rate
+- **Formula:** `(closedCancelled + closedReschedule) / totalFollowups * 100`
+- **Why:** Measure speed of resolving patient responses
+- **Calculation:** Count rows with followupStatus="closed" vs all rows
+- **Status:** ✅ Fully implemented
+
+#### Follow-up Response Time (Median)
+- **Formula:** `median(updatedAt - createdAt) for closed follow-ups`
+- **Why:** Benchmark team responsiveness
+- **Calculation:** Extract time deltas from all closed follow-ups, sort, find median in hours
+- **Status:** ✅ Fully implemented
+
+#### Recovery Rate
+- **Formula:** `cancelledWithRebook / totalCancelled * 100`
+- **Why:** Measure if we successfully resell cancelled appointments
+- **Calculation:** Count CancelledFollowUp where followupStatus="booked" divide by total cancelled
+- **Status:** ✅ Fully implemented (depends on followupStatus="booked" value being used)
+
+#### Open Follow-ups Backlog
+- **Formula:** `count(where followupStatus="open" AND createdAt in range)`
+- **Overdue:** `count(where age > 2 days)`
+- **Why:** Revenue leakage indicator - unresolved follow-ups = lost rebooking
+- **Calculation:** Filter open cancelled + reschedule + recall rows
+- **Status:** ✅ Fully implemented
+
+#### Recall Conversion Rate
+- **Formula:** `recalled / ready * 100`
+- **Why:** Measure effectiveness of "no-next-visit" follow-up system
+- **Calculation:** Count Recall rows with sendStatus="recalled" vs "ready"
+- **Status:** ✅ Fully implemented
+
+#### Needs Review Rate (Data Quality)
+- **Formula:** `needsReviewCount / totalOutbox * 100`
+- **Why:** Identify upstream data entry issues
+- **Calculation:** Count rows flagged for review (missing name/dentist/phone, duplicates) vs total
+- **Status:** ✅ Fully implemented
+
+#### Cancellation Rate Trend (MoM)
+- **Formula:** `((current_month - previous_month) / previous_month) * 100`
+- **Why:** Detect rising cancellation issues
+- **Calculation:** Filter CancelledFollowUp by createdAt range, compute % change
+- **Status:** ✅ Fully implemented
+
+#### Time-Slot Leakage Analysis
+- **Formula:** `GROUP BY startIso(hour) → (confirmed + cancelled + noResponse) / total`
+- **Why:** Identify time slots with highest dropout rates
+- **Calculation:** Group confirmations and cancellations by hour, compute leakage rate per hour
+- **Status:** ✅ Fully implemented
+
+#### Day-of-Week Patterns
+- **Formula:** `GROUP BY day(startIso) → confirmation%, cancellation%, volume`
+- **Why:** Identify weekly trends for scheduling optimization
+- **Calculation:** Group by day of week, compute rates and counts
+- **Status:** ✅ Fully implemented
+
+#### Top Cancellation Reasons
+- **Formula:** `frequency(CancelledFollowUp.cancelReason) sorted DESC, top 10`
+- **Why:** Identify systemic issues (cost, availability, etc.)
+- **Calculation:** Extract cancelReason field, count frequency, sort
+- **Status:** ✅ Fully implemented
+
+---
+
+## What Cannot Be Computed (and Why)
+
+### Message Type ROI
+- **Issue:** Impossible to attribute a patient response to a specific reminder without explicit tracking
+- **Example:** Patient receives 48hr + 24hr + 2hr reminders → confirms. Which one caused it?
+- **Solution:** Would require each reminder to have a unique tracking ID and patient action to reference it
+- **Status:** ⚠️ Not implementable without backend changes
+
+### Dentist Revenue Impact
+- **Issue:** Dashboard data doesn't include appointment fees or which appointments are revenue-generating
+- **Reason:** Scope is WhatsApp messaging, not accounting
+- **Status:** ⚠️ Out of scope (would require integration with accounting system)
+
+### Message Response Time Distribution
+- **Issue:** We only know when message was sent (sentAt) and when form was submitted (createdAt in followup sheet), not when message was read
+- **Reason:** WhatsApp Web doesn't expose read receipts to third-party apps
+- **Status:** ⚠️ Not feasible with current architecture
+
+### Patient Response Patterns by Reminder Type
+- **Issue:** Same as Message Type ROI - can't isolate which reminder triggered the response
+- **Status:** ⚠️ Not implementable without unique tracking IDs per reminder
+
+---
+
+## UI/UX Changes
+
+### Layout Restructuring
+**Before:** Single full-width dashboard
+**After:** Sidebar + Main content area with 2 tabs
+
+### Left Sidebar (`DashboardNav`)
+- Fixed position on desktop, slide-out on mobile
+- Contains navigation between Dashboard and Reports
+- Branded header with Alcora logo
+- Responsive design with hamburger menu on mobile (<768px width)
+
+### Main Dashboard Tab
+- All existing functionality preserved
+- Same queue management, follow-up handling, recall system
+- Mobile-friendly with adjusted header layout
+
+### Reports & KPIs Tab
+- 5 sub-tabs:
+  - **Overview:** Top-level KPIs, 24h rates, response distribution chart, MoM trend
+  - **Reminders:** Coverage by type with progress bars
+  - **Follow-ups:** Completion rate, response time, recovery rate, open backlog alerts
+  - **Patterns:** Time-slot leakage heatmap, day-of-week line chart, cancellation reasons
+  - **Data Quality:** Needs review rate and data quality score
+- Interactive Recharts visualizations
+- Color-coded badges and stat cards
+- Alert boxes for critical issues (high leakage, overdue follow-ups)
+- "Generate Weekly Report" button with PDF download
+
+### PDF Report Format
+- Narrative format (not just raw data)
+- Sections:
+  - Executive Summary (1-2 sentences with context)
+  - Key Performance Indicators (all 6 main metrics)
+  - Reminder Coverage (3 reminders with counts)
+  - Follow-up Status (4 metrics)
+  - Trends & Analysis (MoM trend with interpretation)
+  - Top Cancellation Reasons (top 5)
+  - Weekly Patterns (best/worst days)
+  - Recommendations (2-4 actionable items based on data)
+  - Footer with generation timestamp
+- Auto-saved as: `Weekly_Report_YYYY-MM-DD.pdf`
+
+---
+
+## How Metrics Are Calculated (Technical Details)
+
+### Data Flow
+
+1. **Data Fetch** (SkeletonDashboard.tsx)
+   - useEffect hook polls Supabase Edge Functions every 30 seconds
+   - Fetches: Outbox, Confirmed, CancelledFollowUp, RescheduleFollowUp, Recall sheets
+   - Data is mapped to typed objects (OutboxRow, CancelledFollowUp, etc.)
+
+2. **State Update**
+   - Raw arrays stored in React state: `outboxRows`, `confirmRows`, `cancelledFollowUps`, `rescheduleFollowUps`, `recallRows`
+   - Metrics state: `metricsData` (can be null while loading)
+
+3. **Metrics Calculation**
+   - Triggered by useEffect whenever any data array changes
+   - Calls `calculateMetrics()` from metricsCalculator.ts
+   - Pure function - no side effects
+   - Returns `MetricsData` object with all KPIs
+
+4. **Display**
+   - Reports component receives `metricsData` as prop
+   - Renders tabs and charts based on available metrics
+   - Charts use Recharts library with responsive containers
+
+### Date/Time Handling
+
+- All dates assumed to be ISO 8601 strings in Sheets
+- Parsed using `parseISO()` from date-fns
+- Dubai timezone used for "today" checks via `toZonedTime()` from date-fns-tz
+- Comparisons use UTC milliseconds for consistency
+
+### Example Calculation: Confirmation Rate (24h)
+
+```typescript
+const now = new Date();
+const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+const sentLast24h = outboxRows.filter((r) => 
+  r.sentAt && isDateInRange(r.sentAt, last24h, now)
+).length;
+
+const confirmedLast24h = confirmRows.filter((r) => 
+  r.createdAt && isDateInRange(r.createdAt, last24h, now)
+).length;
+
+const confirmationRate24h = sentLast24h > 0 ? (confirmedLast24h / sentLast24h) * 100 : 0;
+```
+
+---
+
+## Future Enhancements / TODOs
+
+### Short-term
+1. ✅ **Implement PDF Report** - DONE with jsPDF
+2. 🔄 **Add Email Report** - Send report as attachment
+3. 🔄 **Add Chart Export** - Download individual charts as PNG
+4. 🔄 **Custom Date Range** - Allow selecting arbitrary date ranges for metrics
+5. 🔄 **Dentist Breakdown** - Filter metrics by specific dentist
+6. 🔄 **Clinic Comparison** - Compare metrics across multiple clinics
+
+### Medium-term
+1. **Message Type Attribution** - Backend change: add messageTypeId to patient response form, track which reminder they responded to
+2. **Read Receipts** - Integrate WhatsApp Business API (Phase 2) for true read/delivery tracking
+3. **Predictive Alerts** - ML model to predict cancellations before they happen
+4. **A/B Testing** - Automatically test reminder wording/timing variations
+5. **Recall SMS** - Extend beyond WhatsApp to SMS for better recall reach
+
+### Long-term
+1. **Revenue Dashboard** - Integrate with clinic booking system to show $ impact
+2. **AI-Powered Recommendations** - Use metrics to suggest optimal reminder times per patient segment
+3. **Multi-clinic Analytics** - Comparative benchmarking across all clinics using platform
+4. **Webhook Dashboard** - Real-time alerts when key metrics cross thresholds
+
+---
+
+## Rollback Instructions
+
+If you want to revert to the pre-metrics version:
+
+```bash
+git checkout HEAD~1  # Go back one commit before metrics
+# OR
+git reset --hard 02ff8ee  # Reset to initial baseline commit
+```
+
+All changes are committed to git, so you can easily branch or reset as needed.
