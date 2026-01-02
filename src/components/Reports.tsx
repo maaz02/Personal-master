@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MetricsData } from "@/lib/metricsCalculator";
+import { generateWeeklyReport } from "@/lib/reportGenerator";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell } from "recharts";
 import { Download, FileText } from "lucide-react";
 
@@ -54,7 +55,7 @@ export function Reports({ metrics, onGenerateReport }: ReportsProps) {
     <div className="h-full space-y-6 overflow-y-auto p-6">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold">Reports & KPIs</h2>
-        <Button onClick={onGenerateReport} size="sm" className="gap-2">
+        <Button onClick={() => generateWeeklyReport(metrics)} size="sm" className="gap-2">
           <Download className="h-4 w-4" />
           Generate Weekly Report
         </Button>
