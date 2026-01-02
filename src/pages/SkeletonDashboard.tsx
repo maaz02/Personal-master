@@ -1,5 +1,5 @@
 
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -77,6 +77,7 @@ type RecallRow = {
   id: string;
   patientName: string;
   dentist: string;
+  service?: string;
   lastVisitIso: string;
   phoneE164?: string;
   copyBlock?: string;
@@ -319,6 +320,11 @@ const SkeletonDashboard = () => {
   const [rescheduleContactRow, setRescheduleContactRow] = useState<RescheduleFollowUp | null>(null);
   const [recallContactOpen, setRecallContactOpen] = useState(false);
   const [recallContactRow, setRecallContactRow] = useState<RecallRow | null>(null);
+  const [recallAlertOpen, setRecallAlertOpen] = useState(false);
+  const [recallAlertRow, setRecallAlertRow] = useState<RecallRow | null>(null);
+  const recallAlertTimerRef = useRef<number | null>(null);
+  const recallSeenRef = useRef<Set<string>>(new Set());
+  const recallInitRef = useRef(false);
 
   const [outboxRows, setOutboxRows] = useState<OutboxRow[]>([]);
   const [cancelledFollowUps, setCancelledFollowUps] = useState<CancelledFollowUp[]>([]);
@@ -409,6 +415,7 @@ const SkeletonDashboard = () => {
     patientName: r.patientName ?? r.patient_name ?? "Unknown",
     phoneE164: r.phoneE164 ?? r.phone_e164 ?? r.phone ?? "",
     dentist: r.dentist ?? "Unknown",
+    service: r.service ?? r.service_name ?? r.serviceName,
     lastVisitIso: r.lastVisitIso ?? r.last_visit_iso ?? "",
     copyBlock: r.copyBlock ?? r.copy_block ?? "",
     sendStatus: (r.sendStatus ?? r.send_status ?? "ready") as RecallRow["sendStatus"],
@@ -564,6 +571,46 @@ const SkeletonDashboard = () => {
 
   const followUpCount = cancelledOpen.length + rescheduleOpen.length + recallOpen.length;
 
+  useEffect(() => {
+    const currentIds = new Set(recallOpen.map((row) => row.id));
+
+    if (!recallInitRef.current) {
+      recallSeenRef.current = currentIds;
+      recallInitRef.current = true;
+      return;
+    }
+
+    const newRows = recallOpen.filter((row) => !recallSeenRef.current.has(row.id));
+    if (newRows.length > 0) {
+      const newestRow = newRows.reduce((best, row) => {
+        const bestTime = new Date(best.createdAt || best.updatedAt || best.lastVisitIso || 0).getTime() || 0;
+        const rowTime = new Date(row.createdAt || row.updatedAt || row.lastVisitIso || 0).getTime() || 0;
+        return rowTime >= bestTime ? row : best;
+      }, newRows[0]);
+
+      setRecallAlertRow(newestRow);
+      setRecallAlertOpen(true);
+
+      if (recallAlertTimerRef.current !== null) {
+        window.clearTimeout(recallAlertTimerRef.current);
+      }
+      recallAlertTimerRef.current = window.setTimeout(() => {
+        setRecallAlertOpen(false);
+        recallAlertTimerRef.current = null;
+      }, 10000);
+    }
+
+    recallSeenRef.current = currentIds;
+  }, [recallOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (recallAlertTimerRef.current !== null) {
+        window.clearTimeout(recallAlertTimerRef.current);
+      }
+    };
+  }, []);
+
   const followUpOverdue = [...cancelledOpen, ...rescheduleOpen].filter((row) => {
     const updatedAt = toDate(row.updatedAt || row.createdAt);
     if (!updatedAt) return false;
@@ -579,9 +626,11 @@ const SkeletonDashboard = () => {
 
   const weeklyClosed = weeklyWindow.filter((row) => row.status === "closed").length;
   const weeklyTotal = weeklyWindow.length;
-  const countBubble = (count: number) =>
+  const countBubble = (count: number, className = "") =>
     count > 0 ? (
-      <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary/10 px-1 text-xs font-semibold text-primary ring-1 ring-primary/20">
+      <span
+        className={`ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary/10 px-1 text-xs font-semibold text-primary ring-1 ring-primary/20 ${className}`}
+      >
         {count}
       </span>
     ) : null;
@@ -590,6 +639,32 @@ const SkeletonDashboard = () => {
     if (!value || typeof navigator === "undefined") return;
     navigator.clipboard?.writeText(value).catch(() => undefined);
   };
+
+  const buildRecallTemplate = (row?: RecallRow | null) => {
+    if (!row) return "";
+
+    const baseLines = (row.copyBlock || "")
+      .split(/\r?\n/)
+      .map((line) => line.trimEnd())
+      .filter(Boolean);
+
+    const fallbackLines = [
+      `Patient: ${row.patientName ?? "Unknown"}`,
+      `Phone: ${row.phoneE164 ?? "Unknown"}`,
+      `Doctor: ${row.dentist ?? "Unknown"}`,
+    ];
+
+    const lines = baseLines.length > 0 ? baseLines : fallbackLines;
+    const sanitized = lines.filter((line) => {
+      if (/last\s*visit/i.test(line)) return false;
+      if (/previous\s*service/i.test(line)) return false;
+      return true;
+    });
+
+    return sanitized.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  };
+
+  const recallMessage = buildRecallTemplate(recallContactRow);
 
   const updateOutboxRow = (id: string, updater: (row: OutboxRow) => OutboxRow) => {
     setOutboxRows((prev) => prev.map((row) => (row.id === id ? updater(row) : row)));
@@ -812,6 +887,20 @@ const SkeletonDashboard = () => {
       sendStatus: "done",
       updatedAt,
     });
+  };
+
+  const dismissRecallAlert = () => {
+    setRecallAlertOpen(false);
+    if (recallAlertTimerRef.current !== null) {
+      window.clearTimeout(recallAlertTimerRef.current);
+      recallAlertTimerRef.current = null;
+    }
+  };
+
+  const handleRecallAlertNavigate = () => {
+    setActiveTab("followups");
+    setFollowupTab("recall");
+    dismissRecallAlert();
   };
 
 
@@ -1217,7 +1306,7 @@ const SkeletonDashboard = () => {
                       Reschedule {countBubble(rescheduleOpen.length)}
                     </TabsTrigger>
                     <TabsTrigger value="recall" className={`${tabTriggerBase} data-[state=active]:bg-purple-600`}>
-                      Recall {countBubble(recallOpen.length)}
+                      Recall {countBubble(recallOpen.length, "bg-purple-500 text-white ring-purple-400/60")}
                     </TabsTrigger>
                   </TabsList>
 
@@ -1696,64 +1785,144 @@ const SkeletonDashboard = () => {
       </Dialog>
 
       <Dialog
+        open={recallAlertOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            dismissRecallAlert();
+            return;
+          }
+          setRecallAlertOpen(true);
+        }}
+      >
+        <DialogContent className="max-w-sm rounded-3xl border-0 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 shadow-[0_20px_60px_rgba(15,23,42,0.4)] p-0 overflow-hidden">
+          {/* Animated background blur effect */}
+          <div className="absolute inset-0 overflow-hidden pointer-events-none">
+            <div className="absolute -top-1/2 -right-1/2 w-full h-full bg-gradient-to-b from-purple-500/10 to-transparent rounded-full blur-3xl animate-pulse"></div>
+          </div>
+          
+          <div className="relative z-10 p-7">
+            <div className="mb-6">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-gradient-to-br from-purple-500/20 to-blue-500/20 border border-purple-500/30 mb-4">
+                <CheckCircle2 className="w-6 h-6 text-purple-400" />
+              </div>
+              <DialogTitle className="text-2xl font-bold bg-gradient-to-r from-white via-slate-100 to-slate-200 bg-clip-text text-transparent">
+                Book their next appointment
+              </DialogTitle>
+              <DialogDescription className="text-slate-400 mt-2 text-sm">
+                A recall just came in. Open the Recall tab to follow up.
+              </DialogDescription>
+            </div>
+
+            <div className="grid gap-3 mb-6">
+              <div className="rounded-2xl border border-slate-700/50 bg-gradient-to-br from-slate-800/50 via-slate-800/30 to-slate-900/50 p-4 backdrop-blur-sm hover:border-purple-500/30 transition-all duration-300">
+                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Patient</div>
+                <div className="text-base font-semibold text-white">
+                  {recallAlertRow?.patientName ?? "Unknown"}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-slate-700/50 bg-gradient-to-br from-slate-800/50 via-slate-800/30 to-slate-900/50 p-4 backdrop-blur-sm hover:border-purple-500/30 transition-all duration-300">
+                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Dentist</div>
+                <div className="text-base font-semibold text-white">
+                  {recallAlertRow?.dentist ?? "Unknown"}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-slate-700/50 bg-gradient-to-br from-slate-800/50 via-slate-800/30 to-slate-900/50 p-4 backdrop-blur-sm hover:border-purple-500/30 transition-all duration-300">
+                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Service</div>
+                <div className="text-base font-semibold text-white">
+                  {recallAlertRow?.service ?? "Unknown"}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-3 pt-2">
+              <Button
+                className="rounded-xl flex-1 bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white font-semibold shadow-lg hover:shadow-xl transition-all duration-300 transform hover:scale-[1.02]"
+                onClick={handleRecallAlertNavigate}
+              >
+                Go to recalls
+              </Button>
+              <Button
+                className="rounded-xl flex-1 border border-slate-600/50 bg-slate-800/30 hover:bg-slate-700/50 text-slate-100 font-semibold transition-all duration-300 backdrop-blur-sm"
+                onClick={dismissRecallAlert}
+              >
+                Later
+              </Button>
+            </div>
+
+            <div className="mt-4 text-center text-xs text-slate-500">
+              Auto closes in 10s.
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
         open={recallContactOpen}
         onOpenChange={(open) => {
           setRecallContactOpen(open);
           if (!open) setRecallContactRow(null);
         }}
       >
-        <DialogContent className="max-w-md rounded-2xl">
+        <DialogContent className="w-[92vw] max-w-lg max-h-[78vh] overflow-y-auto rounded-3xl border-slate-200 bg-white/95 p-7 shadow-[0_20px_60px_rgba(15,23,42,0.32)]">
           <DialogHeader>
-            <DialogTitle className="text-lg font-bold">Send Recall Message</DialogTitle>
-            <DialogDescription>Use the details below to contact the patient.</DialogDescription>
+            <DialogTitle className="text-xl font-extrabold text-slate-900">Send Recall Message</DialogTitle>
+            <DialogDescription className="text-slate-600">
+              Use the details below to contact the patient.
+            </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 text-sm">
-            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
-              <div className="text-xs font-semibold text-muted-foreground">PATIENT NAME</div>
-              <div className="mt-2 font-semibold text-foreground">
+          <div className="grid gap-3 text-sm sm:grid-cols-2">
+            <div className="rounded-2xl border border-slate-200/70 bg-gradient-to-br from-white via-white to-slate-50 p-4 shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Patient name</div>
+              <div className="mt-2 text-base font-semibold text-slate-900">
                 {recallContactRow?.patientName ?? "Unknown"}
               </div>
             </div>
-            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
-              <div className="text-xs font-semibold text-muted-foreground">PHONE</div>
-              <div className="mt-2 font-mono font-semibold text-foreground break-all">
+            <div className="rounded-2xl border border-slate-200/70 bg-gradient-to-br from-white via-white to-slate-50 p-4 shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Phone</div>
+              <div className="mt-2 break-all font-mono text-base font-semibold text-slate-900">
                 {recallContactRow?.phoneE164 || "Unknown"}
               </div>
             </div>
-            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
-              <div className="text-xs font-semibold text-muted-foreground">DENTIST</div>
-              <div className="mt-2 font-semibold text-foreground">
+            <div className="rounded-2xl border border-slate-200/70 bg-gradient-to-br from-white via-white to-slate-50 p-4 shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Dentist</div>
+              <div className="mt-2 text-base font-semibold text-slate-900">
                 {recallContactRow?.dentist ?? "Unknown"}
               </div>
             </div>
-            <div className="rounded-xl border border-border/40 bg-slate-50 p-4">
-              <div className="text-xs font-semibold text-muted-foreground">LAST VISIT</div>
-              <div className="mt-2 font-semibold text-foreground">
+            <div className="rounded-2xl border border-slate-200/70 bg-gradient-to-br from-white via-white to-slate-50 p-4 shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Last visit</div>
+              <div className="mt-2 text-base font-semibold text-slate-900">
                 {recallContactRow?.lastVisitIso
                   ? new Date(recallContactRow.lastVisitIso).toLocaleDateString()
                   : "Unknown"}
               </div>
             </div>
-            {recallContactRow?.copyBlock && (
-              <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
-                <div className="text-xs font-semibold text-muted-foreground">MESSAGE TEMPLATE</div>
-                <div className="mt-2 whitespace-pre-wrap text-xs text-foreground font-mono">
-                  {recallContactRow.copyBlock}
+            <div className="rounded-2xl border border-slate-200/70 bg-gradient-to-br from-white via-white to-slate-50 p-4 shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Previous service</div>
+              <div className="mt-2 text-base font-semibold text-slate-900">
+                {recallContactRow?.service ?? "Unknown"}
+              </div>
+            </div>
+            {recallMessage ? (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-[inset_0_1px_0_rgba(148,163,184,0.35)] sm:col-span-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Message template</div>
+                <div className="mt-2 whitespace-pre-wrap text-sm font-semibold leading-relaxed text-slate-900">
+                  {recallMessage}
                 </div>
               </div>
-            )}
-            <div className="flex flex-col gap-2 pt-2">
+            ) : null}
+            <div className="flex flex-col gap-2 pt-2 sm:col-span-2">
               <Button
-                className="rounded-xl w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold"
-                onClick={() => copyText(recallContactRow?.copyBlock)}
-                disabled={!recallContactRow?.copyBlock}
+                className="rounded-full w-full bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-semibold shadow-[0_12px_26px_rgba(124,58,237,0.35)] hover:from-purple-500 hover:to-indigo-500"
+                onClick={() => copyText(recallMessage)}
+                disabled={!recallMessage}
               >
                 <MessageSquare size={16} className="mr-2" />
                 Copy message
               </Button>
               <Button
                 variant="outline"
-                className="rounded-xl w-full border-border/40"
+                className="rounded-full w-full border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                 onClick={() => recallContactRow && handleRecallDone(recallContactRow)}
                 disabled={!recallContactRow}
               >
@@ -1762,7 +1931,7 @@ const SkeletonDashboard = () => {
               </Button>
               <Button 
                 variant="outline" 
-                className="rounded-xl w-full border-border/40"
+                className="rounded-full w-full border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
                 onClick={() => setRecallContactOpen(false)}
               >
                 Close
@@ -1776,4 +1945,3 @@ const SkeletonDashboard = () => {
 };
 
 export default SkeletonDashboard;
-
